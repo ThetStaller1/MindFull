@@ -1,0 +1,28 @@
+# Dependencies for HealthKit to Fitbit Conversion System
+
+# Data manipulation
+pandas==2.1.1
+numpy==1.26.0
+
+# Date/time manipulation
+python-dateutil>=2.8.2
+
+# JSON handling (part of the standard library, but listed for clarity)
+# json
+
+# Datetime handling (part of the standard library, but listed for clarity)
+# datetime
+
+# File system operations (part of the standard library, but listed for clarity)
+# os, sys
+
+# Added from the code block
+xgboost==2.0.0
+coremltools==8.1
+scikit-learn==1.3.1
+
+# FastAPI and related dependencies
+fastapi==0.104.1
+uvicorn==0.23.2
+python-multipart==0.0.6
+pydantic==2.4.2 
