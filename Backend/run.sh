@@ -17,6 +17,9 @@ else
     pip install -r requirements.txt
 fi
 
+# Install email-validator if not already installed
+pip install email-validator
+
 # Run FastAPI app
 echo "Starting MindFull API server..."
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload 

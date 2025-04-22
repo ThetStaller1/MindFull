@@ -1,0 +1,115 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Project Overview
+MentalWatch is a mental health screening application that leverages smartwatch data to assess the user's mental health status. The application consists of an iOS client app that interfaces with Apple Watch, a FastAPI backend for data processing and API endpoints, and a Supabase database for data storage and authentication.
+System Architecture
+Components
+
+iOS App: Front-end client that interfaces with Apple HealthKit and displays results
+FastAPI Backend: All API endpoints, business logic, and algorithm processing
+Supabase: Cloud database and authentication services
+
+Core Principles
+
+Security First: All database interactions must flow through the backend API
+Efficiency: Only retrieve and process new data since last sync
+
+Data Flow
+Authentication Flow
+
+User opens iOS app
+iOS app calls backend authentication endpoint
+Backend communicates with Supabase for authentication
+Authentication token is returned to iOS app via backend
+iOS app stores authentication token securely
+
+Data Collection Flow
+
+User authorizes HealthKit data access
+App retrieves timestamp of last data upload from backend
+App collects only new data from HealthKit (since last upload) within 60-day window
+App sends collected data to backend API
+Backend stores data in Supabase
+
+Analysis Flow
+
+User initiates mental health screening in iOS app
+iOS app requests analysis from backend
+Backend retrieves last 60 days of data from Supabase
+Backend processes data through mental health algorithm
+Backend stores analysis results in Supabase
+Backend returns results to iOS app for display
+
+Technical Requirements
+iOS App Requirements
+
+Swift UI for interface development
+HealthKit integration for Apple Watch data
+No direct connections to Supabase
+Secure storage of authentication tokens
+
+Backend Requirements
+
+FastAPI framework
+Supabase client integration
+Mental health algorithm implementation
+Comprehensive error handling
+Logging system for monitoring
+
+Database Schema (Supabase)
+
+User authentication
+Health data with timestamp indexing
+Mental health screening results
+
+Development Rules for Cursor AI
+
+Core Architecture Adherence:
+
+Never implement direct Supabase connections from iOS
+All database operations must route through backend API endpoints
+
+
+Feature Development:
+
+Implement only explicitly requested features
+Do not add or modify features without explicit instructions
+Maintain the established data flow patterns
+
+
+Supabase Interaction:
+
+Use Supabase MCP (Programmatic Context) for all database operations
+Apply proper authentication and authorization controls
+
+
+Error Handling:
+Implement comprehensive error handling at all levels
+
+
+Data Processing:
+
+Implement efficient data retrieval based on timestamps
+Only process necessary data within 60-day window
+Ensure algorithm processing occurs on backend only
+
+
+Security:
+
+Implement secure token storage and transmission
+Validate all inputs at API endpoints
+Apply proper authentication checks for all sensitive operations
+
+
+
+Implementation Guidelines
+When Cursor AI is assisting with code for this project, it should:
+
+Follow the established architecture strictly
+Reference these guidelines when making decisions
+Only implement requested features
+Use the Supabase MCP for database operations
+Maintain the separation between iOS client and database

@@ -1,16 +1,20 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel, EmailStr
 from typing import List, Dict, Optional, Any
 import pandas as pd
 import numpy as np
 import pickle
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import joblib
+
+# Import Supabase client
+from supabase_client import SupabaseClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -33,11 +37,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# OAuth2 scheme for token authentication
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
 # Define model paths - EXACTLY as in test_mental_health_model.py
 MODEL_DIR = Path("model")
 MODEL_PATH = MODEL_DIR / "mental_health_model.xgb"
 FEATURE_IMPORTANCE_PATH = MODEL_DIR / "feature_importance.csv"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.json"
+
+# Authentication models
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserInfo(BaseModel):
+    id: str
+    email: EmailStr
+
+class TokenData(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_at: int
+    user: UserInfo
 
 # Pydantic models for request/response validation
 class HealthKitData(BaseModel):
@@ -63,12 +89,18 @@ class AnalysisResult(BaseModel):
     contributingFactors: Dict[str, float]
     analysisDate: str
 
-# Helper class for mental health prediction
+class UserAuth(BaseModel):
+    userId: str
+    authToken: str
+
+class AnalysisRequest(BaseModel):
+    userId: str
+    forceRun: bool = False
+
+# Helper class for mental health prediction - EXACTLY matching test_mental_health_model.py
 class MentalHealthPredictor:
     def __init__(self):
         """Load the mental health prediction model and feature importance data"""
-        
-        # Initialize Mental Health Predictor - EXACTLY as in test_mental_health_model.py
         logger.info("Initializing Mental Health Predictor...")
         
         # Load the model - EXACTLY as in test_mental_health_model.py
@@ -76,21 +108,19 @@ class MentalHealthPredictor:
         logger.info(f"Loading model from: {model_path}")
         
         try:
-            # Use pickle.load instead of joblib.load to match test_mental_health_model.py
-            with open(model_path, 'rb') as f:
-                self.model = pickle.load(f)
+            # Use joblib.load instead of pickle.load
+            self.model = joblib.load(model_path)
             logger.info(f"Model loaded successfully: {type(self.model).__name__}")
         except Exception as e:
             logger.error(f"Error loading model: {e}")
             raise RuntimeError(f"Failed to load mental health model: {e}")
         
         # Load feature importance - EXACTLY as in test_mental_health_model.py
+        feature_importance_path = os.path.join(os.path.dirname(__file__), "model", "feature_importance.csv")
+        logger.info(f"Loading feature importance from: {feature_importance_path}")
         try:
-            importance_path = os.path.join(os.path.dirname(__file__), "model", "feature_importance.csv")
-            logger.info(f"Loading feature importance from: {importance_path}")
-            
-            if os.path.exists(importance_path):
-                self.feature_importance = pd.read_csv(importance_path)
+            if os.path.exists(feature_importance_path):
+                self.feature_importance = pd.read_csv(feature_importance_path)
                 logger.info(f"Feature importance loaded with {len(self.feature_importance)} features")
             else:
                 logger.warning("Feature importance file not found, will not include importance data")
@@ -100,10 +130,9 @@ class MentalHealthPredictor:
             self.feature_importance = None
         
         # Load feature names - EXACTLY as in test_mental_health_model.py
+        feature_names_path = os.path.join(os.path.dirname(__file__), "model", "feature_names.json")
+        logger.info(f"Loading feature names from: {feature_names_path}")
         try:
-            feature_names_path = os.path.join(os.path.dirname(__file__), "model", "feature_names.json")
-            logger.info(f"Loading feature names from: {feature_names_path}")
-            
             if os.path.exists(feature_names_path):
                 with open(feature_names_path, 'r') as f:
                     self.feature_names = json.load(f)
@@ -292,53 +321,168 @@ class MentalHealthPredictor:
             logger.info(f"Using {len(self.feature_names)} feature columns for prediction")
         
         # Make prediction with the model - EXACTLY as in test_mental_health_model.py
-        prediction_proba = self.model.predict_proba(X)[:, 1]
-        prediction_class = self.model.predict(X)
-        
-        # Log prediction details
-        logger.info(f"Prediction result: class={prediction_class[0]}, probability={prediction_proba[0]:.4f}")
-        
-        # Get binary classification result - EXACTLY as in test_mental_health_model.py
-        if prediction_proba[0] < 0.5:
-            risk_level = "NEGATIVE"  # Control group (no disorder)
-        else:
-            risk_level = "POSITIVE"  # Subject group (has disorder)
+        try:
+            prediction_proba = self.model.predict_proba(X)[:, 1]
+            prediction_class = self.model.predict(X)
             
-        # Get top contributing features - EXACTLY as in test_mental_health_model.py
-        contributing_features = {}
-        if self.feature_importance is not None:
-            # Get top features by importance
-            top_features = self.feature_importance.sort_values('importance', ascending=False).head(10)
+            # Log prediction details
+            logger.info(f"Prediction result: class={prediction_class[0]}, probability={prediction_proba[0]:.4f}")
             
-            for _, row in top_features.iterrows():
-                feature_name = row['feature']
-                importance = row['importance']
-                contributing_features[feature_name] = importance
-        
-        # Create result - EXACTLY as in test_mental_health_model.py format
-        result = AnalysisResult(
-            userId=health_data.userInfo.get('personId', '1001'),
-            prediction=int(prediction_class[0]),
-            riskLevel=risk_level,
-            riskScore=float(prediction_proba[0]),
-            contributingFactors=contributing_features,
-            analysisDate=datetime.now().isoformat()
-        )
-        
-        # Log the risk assessment result
-        logger.info(f"Analysis complete. Risk level: {result.riskLevel}, Score: {result.riskScore:.2f}")
-        
-        return result
+            # Get binary classification result - EXACTLY as in test_mental_health_model.py
+            if prediction_proba[0] < 0.5:
+                risk_level = "NEGATIVE"  # Control group (no disorder)
+            else:
+                risk_level = "POSITIVE"  # Subject group (has disorder)
+                
+            # Get top contributing features - EXACTLY as in test_mental_health_model.py
+            contributing_features = {}
+            if self.feature_importance is not None:
+                # Get top features by importance
+                top_features = self.feature_importance.sort_values('importance', ascending=False).head(10)
+                
+                for _, row in top_features.iterrows():
+                    feature_name = row['feature']
+                    importance = row['importance']
+                    contributing_features[feature_name] = importance
+            
+            # Create result - EXACTLY as in test_mental_health_model.py format
+            result = AnalysisResult(
+                userId=health_data.userInfo.get('personId', '1001'),
+                prediction=int(prediction_class[0]),
+                riskLevel=risk_level,
+                riskScore=float(prediction_proba[0]),
+                contributingFactors=contributing_features,
+                analysisDate=datetime.now().isoformat()
+            )
+            
+            # Log the risk assessment result
+            logger.info(f"Analysis complete. Risk level: {result.riskLevel}, Score: {result.riskScore:.2f}")
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error making prediction: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
-# Lazy-load our predictor
+# Lazy-load our predictor and Supabase client
 @app.on_event("startup")
 async def startup_db_client():
     app.predictor = MentalHealthPredictor()
     logger.info("Mental health predictor initialized")
+    
+    try:
+        app.supabase = SupabaseClient()
+        logger.info("Supabase client initialized")
+    except Exception as e:
+        logger.error(f"Error initializing Supabase client: {e}")
+        # Continue without Supabase client - it will be created on first use
 
 # Get predictor instance
 def get_predictor():
     return app.predictor
+
+# Get Supabase client instance
+def get_supabase():
+    if not hasattr(app, 'supabase'):
+        app.supabase = SupabaseClient()
+    return app.supabase
+
+# Helper to validate authorization
+async def validate_auth(request: Request, auth_token: Optional[str] = Header(None)):
+    """Validate authentication token with Supabase"""
+    if not auth_token:
+        # Check if token is in query params
+        query_params = request.query_params
+        if 'auth_token' in query_params:
+            auth_token = query_params['auth_token']
+    
+    if not auth_token:
+        # Check if Authorization header exists
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            auth_token = auth_header.replace('Bearer ', '')
+    
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+    
+    # Validate token with Supabase
+    supabase = get_supabase()
+    validation_result = supabase.validate_token(auth_token)
+    
+    if not validation_result.get('valid', False):
+        logger.error(f"Invalid auth token: {validation_result.get('error', 'Unknown error')}")
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+    
+    # Return user info from the token
+    return {
+        "user_id": validation_result['user']['id'],
+        "email": validation_result['user']['email']
+    }
+
+# Authentication routes
+@app.post("/register", response_model=TokenData)
+async def register(user_data: UserRegister, supabase: SupabaseClient = Depends(get_supabase)):
+    """Register a new user"""
+    try:
+        result = supabase.register_user(user_data.email, user_data.password)
+        
+        if "error" in result:
+            logger.error(f"Registration failed: {result['error']}")
+            raise HTTPException(status_code=400, detail=result["error"])
+        
+        return TokenData(
+            access_token=result["session"]["access_token"],
+            refresh_token=result["session"]["refresh_token"],
+            expires_at=result["session"]["expires_at"],
+            user=UserInfo(
+                id=result["user"]["id"],
+                email=result["user"]["email"]
+            )
+        )
+    except Exception as e:
+        logger.error(f"Error during registration: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
+@app.post("/login", response_model=TokenData)
+async def login(user_data: UserLogin, supabase: SupabaseClient = Depends(get_supabase)):
+    """Log in an existing user"""
+    try:
+        result = supabase.login_user(user_data.email, user_data.password)
+        
+        if "error" in result:
+            logger.error(f"Login failed: {result['error']}")
+            raise HTTPException(status_code=400, detail=result["error"])
+        
+        return TokenData(
+            access_token=result["session"]["access_token"],
+            refresh_token=result["session"]["refresh_token"],
+            expires_at=result["session"]["expires_at"],
+            user=UserInfo(
+                id=result["user"]["id"],
+                email=result["user"]["email"]
+            )
+        )
+    except Exception as e:
+        logger.error(f"Error during login: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+
+@app.post("/validate-token")
+async def validate_token(auth_info: dict = Depends(validate_auth)):
+    """Validate a token and return user information"""
+    return {
+        "valid": True,
+        "user_id": auth_info["user_id"],
+        "email": auth_info["email"]
+    }
+
+@app.post("/logout")
+async def logout(auth_info: dict = Depends(validate_auth), supabase: SupabaseClient = Depends(get_supabase)):
+    """Log out a user"""
+    try:
+        result = supabase.logout_user(auth_info["user_id"])
+        return {"message": "Successfully logged out"}
+    except Exception as e:
+        logger.error(f"Error during logout: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
 
 # Routes
 @app.get("/")
@@ -348,22 +492,187 @@ async def root():
 @app.post("/analyze", response_model=AnalysisResult)
 async def analyze_health_data(
     health_data: HealthKitData,
-    predictor: MentalHealthPredictor = Depends(get_predictor)
+    predictor: MentalHealthPredictor = Depends(get_predictor),
+    supabase: SupabaseClient = Depends(get_supabase),
+    auth_info: dict = Depends(validate_auth)
 ):
     try:
         logger.info(f"Received health data analysis request")
-        result = predictor.predict(health_data)
+        
+        # Set the user ID from auth in the health data
+        user_id = auth_info["user_id"]
+        health_data.userInfo["personId"] = user_id
+        
+        # Step 1: Store health data in Supabase
+        logger.info(f"Storing health data for user {user_id}")
+        if not supabase.store_health_data(user_id, health_data.dict()):
+            logger.warning(f"Some health data may not have been stored properly for user {user_id}")
+        
+        # Step 2: Fetch the most recent 60 days of data from Supabase
+        logger.info(f"Fetching 60 days of health data from Supabase for user {user_id}")
+        supabase_health_data = supabase.get_health_data_for_analysis(user_id, days=60)
+        
+        # Convert Supabase data to HealthKitData model
+        supabase_health_model = HealthKitData(
+            heartRate=supabase_health_data["heartRate"],
+            steps=supabase_health_data["steps"],
+            activeEnergy=supabase_health_data["activeEnergy"],
+            sleep=supabase_health_data["sleep"],
+            workout=supabase_health_data["workout"],
+            distance=supabase_health_data["distance"],
+            basalEnergy=supabase_health_data["basalEnergy"],
+            flightsClimbed=supabase_health_data["flightsClimbed"],
+            userInfo=supabase_health_data["userInfo"]
+        )
+        
+        # Log the data counts for analysis
+        logger.info(f"Using Supabase data for analysis:")
+        logger.info(f"  - Heart Rate: {len(supabase_health_model.heartRate)} records")
+        logger.info(f"  - Steps: {len(supabase_health_model.steps)} records")
+        logger.info(f"  - Active Energy: {len(supabase_health_model.activeEnergy)} records")
+        logger.info(f"  - Sleep: {len(supabase_health_model.sleep)} records")
+        logger.info(f"  - Workout: {len(supabase_health_model.workout)} records")
+        
+        # Step 3: Run the prediction using data from Supabase
+        logger.info(f"Running prediction using Supabase data for user {user_id}")
+        result = predictor.predict(supabase_health_model)
+        
+        # Step 4: Store analysis result in Supabase
+        logger.info(f"Storing analysis result for user {user_id}")
+        supabase.store_analysis_result(result.dict())
+        
         logger.info(f"Analysis complete. Risk level: {result.riskLevel}, Score: {result.riskScore:.2f}")
         return result
     except Exception as e:
         logger.error(f"Error during analysis: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-# Health check endpoint
+@app.post("/check-analysis")
+async def check_analysis(
+    request: AnalysisRequest,
+    supabase: SupabaseClient = Depends(get_supabase),
+    auth_info: dict = Depends(validate_auth)
+):
+    """Check if a new analysis should be run for the user"""
+    try:
+        user_id = request.userId
+        
+        # Check if we should run a new analysis
+        if request.forceRun:
+            should_run = True
+        else:
+            should_run = supabase.should_run_analysis(user_id)
+        
+        # Get the latest analysis result
+        latest_analysis = supabase.get_latest_analysis(user_id)
+        
+        return {
+            "userId": user_id,
+            "shouldRunAnalysis": should_run,
+            "latestAnalysis": latest_analysis,
+            "message": "New analysis needed" if should_run else "Latest analysis is still valid"
+        }
+    except Exception as e:
+        logger.error(f"Error checking analysis status: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to check analysis status: {str(e)}")
+
+@app.get("/latest-analysis/{user_id}")
+async def get_latest_analysis(
+    user_id: str,
+    supabase: SupabaseClient = Depends(get_supabase),
+    auth_info: dict = Depends(validate_auth)
+):
+    """Get the latest analysis result for a user"""
+    try:
+        # Ensure the user can only access their own data
+        if user_id != auth_info["user_id"] and user_id != "me":
+            raise HTTPException(status_code=403, detail="Not authorized to access this user's data")
+        
+        # If user_id is "me", use the authenticated user's ID
+        if user_id == "me":
+            user_id = auth_info["user_id"]
+            
+        # Get the latest analysis result
+        latest_analysis = supabase.get_latest_analysis(user_id)
+        
+        if not latest_analysis:
+            return {
+                "userId": user_id,
+                "hasAnalysis": False,
+                "message": "No analysis results found for this user"
+            }
+        
+        return {
+            "userId": user_id,
+            "hasAnalysis": True,
+            "analysis": latest_analysis
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting latest analysis: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get latest analysis: {str(e)}")
+
+@app.get("/latest-data-timestamp/{user_id}")
+async def get_latest_data_timestamp(
+    user_id: str,
+    supabase: SupabaseClient = Depends(get_supabase),
+    auth_info: dict = Depends(validate_auth)
+):
+    """Get the latest data timestamp for a user"""
+    try:
+        # Ensure the user can only access their own data
+        if user_id != auth_info["user_id"] and user_id != "me":
+            raise HTTPException(status_code=403, detail="Not authorized to access this user's data")
+        
+        # If user_id is "me", use the authenticated user's ID
+        if user_id == "me":
+            user_id = auth_info["user_id"]
+            
+        # Get the latest data timestamp
+        latest_timestamp = supabase.get_latest_data_timestamp(user_id)
+        
+        if not latest_timestamp:
+            return {
+                "userId": user_id,
+                "hasData": False,
+                "latestTimestamp": datetime.now().isoformat(),
+                "message": "No health data found for this user"
+            }
+        
+        return {
+            "userId": user_id,
+            "hasData": True,
+            "latestTimestamp": latest_timestamp.isoformat(),
+            "message": f"Latest data timestamp: {latest_timestamp.isoformat()}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting latest data timestamp: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get latest data timestamp: {str(e)}")
+
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    """Health check endpoint (no auth required)"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0"
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True) 
+    from dotenv import load_dotenv
+    import os
+    
+    # Load environment variables
+    load_dotenv()
+    
+    # Get API settings from environment
+    host = os.getenv("API_HOST", "0.0.0.0")
+    port = int(os.getenv("API_PORT", "8000"))
+    debug = os.getenv("DEBUG", "False").lower() in ("true", "1", "t")
+    
+    # Run the API
+    uvicorn.run("app:app", host=host, port=port, reload=debug) 

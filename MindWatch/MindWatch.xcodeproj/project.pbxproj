@@ -7,32 +7,19 @@
 	objects = {
 
 /* Begin PBXFileReference section */
-		62A1D4402DADFEEB00969FD1 /* MindWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MindWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6239B4812DB7981400324885 /* MindWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MindWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		62A1D4522DADFF6500969FD1 /* Exceptions for "MindWatch" folder in "MindWatch" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = 62A1D43F2DADFEEB00969FD1 /* MindWatch */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		62A1D4422DADFEEB00969FD1 /* MindWatch */ = {
+		6239B4832DB7981400324885 /* MindWatch */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				62A1D4522DADFF6500969FD1 /* Exceptions for "MindWatch" folder in "MindWatch" target */,
-			);
 			path = MindWatch;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		62A1D43D2DADFEEB00969FD1 /* Frameworks */ = {
+		6239B47E2DB7981400324885 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -42,18 +29,18 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		62A1D4372DADFEEA00969FD1 = {
+		6239B4782DB7981400324885 = {
 			isa = PBXGroup;
 			children = (
-				62A1D4422DADFEEB00969FD1 /* MindWatch */,
-				62A1D4412DADFEEB00969FD1 /* Products */,
+				6239B4832DB7981400324885 /* MindWatch */,
+				6239B4822DB7981400324885 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		62A1D4412DADFEEB00969FD1 /* Products */ = {
+		6239B4822DB7981400324885 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				62A1D4402DADFEEB00969FD1 /* MindWatch.app */,
+				6239B4812DB7981400324885 /* MindWatch.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -61,64 +48,64 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		62A1D43F2DADFEEB00969FD1 /* MindWatch */ = {
+		6239B4802DB7981400324885 /* MindWatch */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 62A1D44D2DADFEEC00969FD1 /* Build configuration list for PBXNativeTarget "MindWatch" */;
+			buildConfigurationList = 6239B48E2DB7981600324885 /* Build configuration list for PBXNativeTarget "MindWatch" */;
 			buildPhases = (
-				62A1D43C2DADFEEB00969FD1 /* Sources */,
-				62A1D43D2DADFEEB00969FD1 /* Frameworks */,
-				62A1D43E2DADFEEB00969FD1 /* Resources */,
+				6239B47D2DB7981400324885 /* Sources */,
+				6239B47E2DB7981400324885 /* Frameworks */,
+				6239B47F2DB7981400324885 /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				62A1D4422DADFEEB00969FD1 /* MindWatch */,
+				6239B4832DB7981400324885 /* MindWatch */,
 			);
 			name = MindWatch;
 			packageProductDependencies = (
 			);
 			productName = MindWatch;
-			productReference = 62A1D4402DADFEEB00969FD1 /* MindWatch.app */;
+			productReference = 6239B4812DB7981400324885 /* MindWatch.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		62A1D4382DADFEEA00969FD1 /* Project object */ = {
+		6239B4792DB7981400324885 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1630;
 				LastUpgradeCheck = 1630;
 				TargetAttributes = {
-					62A1D43F2DADFEEB00969FD1 = {
+					6239B4802DB7981400324885 = {
 						CreatedOnToolsVersion = 16.3;
 					};
 				};
 			};
-			buildConfigurationList = 62A1D43B2DADFEEA00969FD1 /* Build configuration list for PBXProject "MindWatch" */;
+			buildConfigurationList = 6239B47C2DB7981400324885 /* Build configuration list for PBXProject "MindWatch" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
 				Base,
 			);
-			mainGroup = 62A1D4372DADFEEA00969FD1;
+			mainGroup = 6239B4782DB7981400324885;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 62A1D4412DADFEEB00969FD1 /* Products */;
+			productRefGroup = 6239B4822DB7981400324885 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				62A1D43F2DADFEEB00969FD1 /* MindWatch */,
+				6239B4802DB7981400324885 /* MindWatch */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		62A1D43E2DADFEEB00969FD1 /* Resources */ = {
+		6239B47F2DB7981400324885 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -128,7 +115,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		62A1D43C2DADFEEB00969FD1 /* Sources */ = {
+		6239B47D2DB7981400324885 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -138,7 +125,7 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		62A1D44B2DADFEEC00969FD1 /* Debug */ = {
+		6239B48C2DB7981600324885 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -202,7 +189,7 @@
 			};
 			name = Debug;
 		};
-		62A1D44C2DADFEEC00969FD1 /* Release */ = {
+		6239B48D2DB7981600324885 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -259,24 +246,21 @@
 			};
 			name = Release;
 		};
-		62A1D44E2DADFEEC00969FD1 /* Debug */ = {
+		6239B48F2DB7981600324885 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = MindWatch/MindWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = WGFNQM6RX3;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = MindWatch/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -290,24 +274,21 @@
 			};
 			name = Debug;
 		};
-		62A1D44F2DADFEEC00969FD1 /* Release */ = {
+		6239B4902DB7981600324885 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = MindWatch/MindWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = WGFNQM6RX3;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = MindWatch/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -324,25 +305,25 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		62A1D43B2DADFEEA00969FD1 /* Build configuration list for PBXProject "MindWatch" */ = {
+		6239B47C2DB7981400324885 /* Build configuration list for PBXProject "MindWatch" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				62A1D44B2DADFEEC00969FD1 /* Debug */,
-				62A1D44C2DADFEEC00969FD1 /* Release */,
+				6239B48C2DB7981600324885 /* Debug */,
+				6239B48D2DB7981600324885 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		62A1D44D2DADFEEC00969FD1 /* Build configuration list for PBXNativeTarget "MindWatch" */ = {
+		6239B48E2DB7981600324885 /* Build configuration list for PBXNativeTarget "MindWatch" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				62A1D44E2DADFEEC00969FD1 /* Debug */,
-				62A1D44F2DADFEEC00969FD1 /* Release */,
+				6239B48F2DB7981600324885 /* Debug */,
+				6239B4902DB7981600324885 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 	};
-	rootObject = 62A1D4382DADFEEA00969FD1 /* Project object */;
+	rootObject = 6239B4792DB7981400324885 /* Project object */;
 }
