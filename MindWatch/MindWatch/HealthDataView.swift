@@ -4,6 +4,7 @@ struct HealthDataView: View {
     @EnvironmentObject private var authViewModel: AuthViewModel
     @EnvironmentObject private var healthViewModel: HealthViewModel
     @State private var isShowingHealthData = false
+    @State private var showingDebugOptions = false
     
     var body: some View {
         NavigationView {
@@ -21,6 +22,26 @@ struct HealthDataView: View {
                                 .fontWeight(.bold)
                             
                             Spacer()
+                            
+                            // Add debug button (long press to activate)
+                            Button(action: {
+                                showingDebugOptions = true
+                            }) {
+                                Image(systemName: "gearshape")
+                                    .foregroundColor(.gray)
+                            }
+                            .actionSheet(isPresented: $showingDebugOptions) {
+                                ActionSheet(
+                                    title: Text("Debug Options"),
+                                    message: Text("Health data debugging tools"),
+                                    buttons: [
+                                        .default(Text("Test HealthKit Access")) {
+                                            healthViewModel.testHealthKitAccess()
+                                        },
+                                        .cancel()
+                                    ]
+                                )
+                            }
                         }
                         
                         if let lastSync = healthViewModel.lastSyncDate {
@@ -48,8 +69,28 @@ struct HealthDataView: View {
                         .disabled(healthViewModel.isLoading)
                         
                         if healthViewModel.isLoading {
-                            ProgressView("Syncing data...")
-                                .padding(.top, 8)
+                            VStack(spacing: 8) {
+                                // Progress bar
+                                if healthViewModel.uploadProgress > 0 {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(healthViewModel.uploadProgressMessage)
+                                            .font(.caption)
+                                            .foregroundColor(.gray)
+                                        
+                                        ProgressView(value: healthViewModel.uploadProgress, total: 1.0)
+                                            .progressViewStyle(LinearProgressViewStyle())
+                                            .padding(.vertical, 4)
+                                        
+                                        Text("\(Int(healthViewModel.uploadProgress * 100))% Complete")
+                                            .font(.caption)
+                                            .foregroundColor(.gray)
+                                    }
+                                    .padding(.top, 8)
+                                } else {
+                                    ProgressView("Collecting data...")
+                                        .padding(.top, 8)
+                                }
+                            }
                         }
                         
                         if let errorMessage = healthViewModel.errorMessage {
@@ -126,7 +167,7 @@ struct HealthDataView: View {
                 color: .purple,
                 count: healthViewModel.workoutData.count,
                 sample: healthViewModel.workoutData.first != nil ? 
-                       "\(formatDuration(Double(healthViewModel.workoutData.first!.duration) ?? 0))" : "No data"
+                       formatDuration(healthViewModel.workoutData.first!.value) : "No data"
             )
         }
     }
@@ -159,22 +200,8 @@ struct HealthDataView: View {
     }
     
     private func collectAndUploadData() {
-        healthViewModel.isLoading = true
-        healthViewModel.errorMessage = nil
-        
-        // Step 1: Collect data from HealthKit
-        healthViewModel.collectHealthData { success in
-            if success {
-                // Step 2: Upload data to backend
-                healthViewModel.uploadHealthData(authToken: authViewModel.getAuthToken()) { uploadSuccess in
-                    if uploadSuccess {
-                        healthViewModel.errorMessage = nil
-                    }
-                }
-            } else {
-                healthViewModel.errorMessage = "No health data found to sync"
-            }
-        }
+        // Use the syncHealthData method directly
+        healthViewModel.syncHealthData()
     }
     
     private func formatDate(_ date: Date) -> String {
@@ -184,20 +211,20 @@ struct HealthDataView: View {
         return formatter.string(from: date)
     }
     
-    private func sampleValue(from data: [HealthDataPoint], unit: String) -> String {
-        if let first = data.first, let value = Double(first.value) {
-            return "\(String(format: "%.1f", value)) \(unit)"
+    private func sampleValue(from data: [HealthKitDataPoint], unit: String) -> String {
+        if let first = data.first {
+            return "\(String(format: "%.1f", first.value)) \(unit)"
         }
         return "No data"
     }
     
-    private func formatDuration(_ seconds: Double) -> String {
-        let minutes = Int(seconds / 60)
-        if minutes < 60 {
-            return "\(minutes) min"
+    private func formatDuration(_ minutes: Double) -> String {
+        let totalMinutes = Int(minutes)
+        if totalMinutes < 60 {
+            return "\(totalMinutes) min"
         } else {
-            let hours = minutes / 60
-            let remainingMinutes = minutes % 60
+            let hours = totalMinutes / 60
+            let remainingMinutes = totalMinutes % 60
             return "\(hours)h \(remainingMinutes)m"
         }
     }

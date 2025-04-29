@@ -6,27 +6,27 @@
 //
 
 import SwiftUI
-import SwiftData
+import HealthKit
 
 @main
 struct MindWatchApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
-
+    @StateObject private var authViewModel = AuthViewModel()
+    @StateObject private var healthViewModel = HealthViewModel()
+    
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            if authViewModel.isAuthenticated {
+                MainTabView()
+                    .environmentObject(authViewModel)
+                    .environmentObject(healthViewModel)
+                    .onAppear {
+                        // Request HealthKit authorization when the app appears
+                        healthViewModel.requestHealthKitAuthorization()
+                    }
+            } else {
+                AuthView()
+                    .environmentObject(authViewModel)
+            }
         }
-        .modelContainer(sharedModelContainer)
     }
 }

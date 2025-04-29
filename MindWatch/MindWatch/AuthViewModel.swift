@@ -8,7 +8,7 @@ class AuthViewModel: ObservableObject {
     @Published var userId: String? = nil
     @Published var userEmail: String? = nil
     
-    private let apiBaseURL = "http://localhost:8000" // Change in production
+    private let apiBaseURL = "http://192.168.1.241:8000" // Updated IP address
     private var authToken: String? = nil
     
     private let tokenKey = "auth_token"
@@ -28,6 +28,9 @@ class AuthViewModel: ObservableObject {
             self.userId = userId
             self.userEmail = email
             self.isAuthenticated = true
+            
+            // Set the token in APIService
+            APIService.shared.setAuthToken(token)
         }
     }
     
@@ -40,6 +43,9 @@ class AuthViewModel: ObservableObject {
         self.userId = userId
         self.userEmail = email
         self.isAuthenticated = true
+        
+        // Set the token in APIService
+        APIService.shared.setAuthToken(token)
     }
     
     private func clearCredentials() {
@@ -51,6 +57,9 @@ class AuthViewModel: ObservableObject {
         self.userId = nil
         self.userEmail = nil
         self.isAuthenticated = false
+        
+        // Clear the token in APIService
+        APIService.shared.clearAuthToken()
     }
     
     func login(email: String, password: String) {

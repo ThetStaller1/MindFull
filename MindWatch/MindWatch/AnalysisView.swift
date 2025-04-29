@@ -189,10 +189,10 @@ struct AnalysisView: View {
         isRequestingAnalysis = true
         healthViewModel.errorMessage = nil
         
-        healthViewModel.requestAnalysis(authToken: authViewModel.getAuthToken()) { success in
-            isRequestingAnalysis = false
-            if !success && healthViewModel.errorMessage == nil {
-                healthViewModel.errorMessage = "Failed to complete analysis"
+        Task {
+            await MainActor.run {
+                healthViewModel.requestAnalysis()
+                isRequestingAnalysis = false
             }
         }
     }
@@ -201,8 +201,11 @@ struct AnalysisView: View {
         if healthViewModel.analysisResult == nil {
             isRequestingAnalysis = true
             
-            healthViewModel.fetchLatestAnalysis(authToken: authViewModel.getAuthToken()) { success in
-                isRequestingAnalysis = false
+            Task {
+                await MainActor.run {
+                    healthViewModel.fetchLatestAnalysis()
+                    isRequestingAnalysis = false
+                }
             }
         }
     }
