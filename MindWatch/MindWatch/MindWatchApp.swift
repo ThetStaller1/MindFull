@@ -12,6 +12,7 @@ import HealthKit
 struct MindWatchApp: App {
     @StateObject private var authViewModel = AuthViewModel()
     @StateObject private var healthViewModel = HealthViewModel()
+    @StateObject private var profileViewModel = ProfileViewModel()
     
     var body: some Scene {
         WindowGroup {
@@ -19,6 +20,7 @@ struct MindWatchApp: App {
                 MainTabView()
                     .environmentObject(authViewModel)
                     .environmentObject(healthViewModel)
+                    .environmentObject(profileViewModel)
                     .onAppear {
                         // Request HealthKit authorization when the app appears
                         healthViewModel.requestHealthKitAuthorization()

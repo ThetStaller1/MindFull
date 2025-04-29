@@ -65,9 +65,8 @@ struct HealthKitDataRequest {
     var basalEnergy: [[String: Any]] = []
     var flightsClimbed: [[String: Any]] = []
     var userInfo: [String: Any] = [
-        "personId": "",
-        "age": 33,
-        "genderBinary": 1  // 1 = female, 0 = male per backend model
+        "age": 33,  // Default value, will be replaced with actual user age
+        "genderBinary": 1  // Default value (1 = female), will be replaced based on user profile
     ]
     
     // Convert to a dictionary that matches backend's HealthKitData model
@@ -113,6 +112,13 @@ struct HealthKitDataRequest {
             "userInfo": userInfo
         ]
     }
+    
+    // Update user info with profile data
+    mutating func updateWithUserProfile(_ profile: UserProfile) {
+        userInfo["age"] = profile.getAge()
+        userInfo["genderBinary"] = UserProfile.genderToBinary(profile.gender)
+        userInfo["gender"] = profile.gender
+    }
 }
 
 struct AnalysisResult: Identifiable, Codable {
@@ -149,5 +155,58 @@ struct AnalysisResult: Identifiable, Codable {
         contributingFactors = try container.decode([String: Double].self, forKey: .contributingFactors)
         analysisDate = try container.decode(String.self, forKey: .analysisDate)
         dataQuality = try? container.decode(DataQuality.self, forKey: .dataQuality)
+    }
+}
+
+// User profile model
+struct UserProfile: Codable {
+    var gender: String = "PREFER_NOT_TO_ANSWER" // Options: "MALE", "FEMALE", "OTHER", "PREFER_NOT_TO_ANSWER"
+    var birthYear: Int = 0
+    var birthMonth: Int = 0
+    
+    func getAge() -> Int {
+        let calendar = Calendar.current
+        let currentDate = Date()
+        let components = calendar.dateComponents([.year, .month], from: currentDate)
+        
+        guard let currentYear = components.year, let currentMonth = components.month,
+              birthYear > 0, birthMonth > 0 else {
+            return 0
+        }
+        
+        var age = currentYear - birthYear
+        
+        // Adjust age if birthday hasn't occurred yet this year
+        if currentMonth < birthMonth {
+            age -= 1
+        }
+        
+        return max(0, age)
+    }
+    
+    func toBirthdateString() -> String {
+        guard birthYear > 0, birthMonth > 0 else {
+            return ""
+        }
+        
+        let dateComponents = DateComponents(year: birthYear, month: birthMonth, day: 1)
+        if let date = Calendar.current.date(from: dateComponents) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            return formatter.string(from: date)
+        }
+        return ""
+    }
+    
+    func toBackendDict() -> [String: Any] {
+        return [
+            "gender": gender,
+            "birthdate": toBirthdateString(),
+            "age": getAge()
+        ]
+    }
+    
+    static func genderToBinary(_ gender: String) -> Int {
+        return gender == "FEMALE" ? 1 : 0
     }
 } 

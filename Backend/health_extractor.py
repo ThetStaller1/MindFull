@@ -57,7 +57,7 @@ class HealthKitExtractor:
             gender_binary: Gender as binary (0=male, 1=female)
             
         Returns:
-            Dictionary of pandas DataFrames for Fitbit-compatible tables
+            pandas DataFrame with features for the mental health model
         """
         logger.info("Processing HealthKit data into Fitbit format")
         
@@ -87,7 +87,7 @@ class HealthKitExtractor:
             heart_rate_daily.columns = ['date', 'avg_rate', 'min_rate', 'max_rate']
             
             # Add person_id and estimate resting rate
-            heart_rate_daily['person_id'] = person_id or '1001'
+            heart_rate_daily['person_id'] = person_id
             heart_rate_daily['resting_rate'] = heart_rate_daily['min_rate'] * 0.9  # Rough estimate
             
             # Convert date to string
@@ -111,7 +111,7 @@ class HealthKitExtractor:
             steps_daily.columns = ['date', 'sum_steps']
             
             # Add person_id
-            steps_daily['person_id'] = person_id or '1001'
+            steps_daily['person_id'] = person_id
             
             # Convert date to string
             steps_daily['date'] = steps_daily['date'].astype(str)
@@ -176,7 +176,7 @@ class HealthKitExtractor:
                     # Create new record for this date
                     sedentary_minutes = 24 * 60 - int(row.get('duration', 0) / 60)
                     activity_records.append({
-                        'person_id': person_id or '1001',
+                        'person_id': person_id,
                         'date': str(date),
                         'activity_calories': int(row.get('totalEnergyBurned', 300)),
                         'very_active_minutes': int(row.get('duration', 0) / 60),
@@ -208,7 +208,7 @@ class HealthKitExtractor:
             # Add calculated fields
             sleep_daily['minute_awake'] = 30  # Default estimate
             sleep_daily['minute_in_bed'] = sleep_daily['minute_asleep'] + sleep_daily['minute_awake']
-            sleep_daily['person_id'] = person_id or '1001'
+            sleep_daily['person_id'] = person_id
             
             # Clean up and format
             sleep_daily = sleep_daily[['person_id', 'sleep_date', 'minute_asleep', 'minute_awake', 'minute_in_bed']]
@@ -236,8 +236,57 @@ class HealthKitExtractor:
         logger.info(f"Processed {len(fitbit_data)} Fitbit-compatible data tables")
         for table, df in fitbit_data.items():
             logger.info(f"  - {table}: {len(df)} records")
+        
+        # Extract features from fitbit_data for model prediction
+        # Create a features DataFrame with demographic info
+        features_df = pd.DataFrame({
+            'age': [age if age is not None else 0],
+            'gender_binary': [gender_binary if gender_binary is not None else 0],
+            'person_id': [person_id if person_id is not None else '1001']
+        })
+        
+        # Extract heart rate features if available
+        if 'fitbit_heart_rate_level' in fitbit_data:
+            hr_df = fitbit_data['fitbit_heart_rate_level']
+            features_df['heart_rate_avg'] = hr_df['avg_rate'].mean() if not hr_df.empty else 0
+            features_df['heart_rate_min'] = hr_df['min_rate'].min() if not hr_df.empty else 0
+            features_df['heart_rate_max'] = hr_df['max_rate'].max() if not hr_df.empty else 0
+            features_df['heart_rate_std'] = hr_df['avg_rate'].std() if not hr_df.empty and len(hr_df) > 1 else 0
+        
+        # Extract step features if available
+        if 'fitbit_intraday_steps' in fitbit_data:
+            steps_df = fitbit_data['fitbit_intraday_steps']
+            features_df['steps_daily_mean'] = steps_df['sum_steps'].mean() if not steps_df.empty else 0
+            features_df['steps_daily_std'] = steps_df['sum_steps'].std() if not steps_df.empty and len(steps_df) > 1 else 0
+            features_df['steps_daily_max'] = steps_df['sum_steps'].max() if not steps_df.empty else 0
+        
+        # Extract activity features if available
+        if 'fitbit_activity' in fitbit_data:
+            activity_df = fitbit_data['fitbit_activity']
+            features_df['activity_very_active_minutes_mean'] = activity_df['very_active_minutes'].mean() if not activity_df.empty else 0
+            features_df['activity_very_active_minutes_std'] = activity_df['very_active_minutes'].std() if not activity_df.empty and len(activity_df) > 1 else 0
+            features_df['activity_very_active_minutes_max'] = activity_df['very_active_minutes'].max() if not activity_df.empty else 0
+            features_df['activity_calories_mean'] = activity_df['activity_calories'].mean() if not activity_df.empty else 0
+            features_df['activity_calories_std'] = activity_df['activity_calories'].std() if not activity_df.empty and len(activity_df) > 1 else 0
+        
+        # Extract sleep features if available
+        if 'fitbit_sleep_daily_summary' in fitbit_data:
+            sleep_df = fitbit_data['fitbit_sleep_daily_summary']
+            features_df['sleep_minute_asleep_mean'] = sleep_df['minute_asleep'].mean() if not sleep_df.empty else 0
+            features_df['sleep_minute_asleep_std'] = sleep_df['minute_asleep'].std() if not sleep_df.empty and len(sleep_df) > 1 else 0
+            features_df['sleep_minute_awake_mean'] = sleep_df['minute_awake'].mean() if not sleep_df.empty else 0
+            features_df['sleep_minute_awake_std'] = sleep_df['minute_awake'].std() if not sleep_df.empty and len(sleep_df) > 1 else 0
             
-        return fitbit_data
+            # Add placeholder values for deep, light, and REM sleep since we don't have actual values
+            features_df['sleep_minute_deep_mean'] = features_df['sleep_minute_asleep_mean'] * 0.2 if not sleep_df.empty else 0
+            features_df['sleep_minute_deep_std'] = features_df['sleep_minute_asleep_std'] * 0.2 if not sleep_df.empty and len(sleep_df) > 1 else 0
+            features_df['sleep_minute_light_mean'] = features_df['sleep_minute_asleep_mean'] * 0.5 if not sleep_df.empty else 0
+            features_df['sleep_minute_light_std'] = features_df['sleep_minute_asleep_std'] * 0.5 if not sleep_df.empty and len(sleep_df) > 1 else 0
+            features_df['sleep_minute_rem_mean'] = features_df['sleep_minute_asleep_mean'] * 0.3 if not sleep_df.empty else 0
+            features_df['sleep_minute_rem_std'] = features_df['sleep_minute_asleep_std'] * 0.3 if not sleep_df.empty and len(sleep_df) > 1 else 0
+        
+        logger.info(f"Created features DataFrame with {features_df.shape[1]} columns")
+        return features_df
     
     def extract_all_data(self, health_data: Any) -> Dict[str, pd.DataFrame]:
         """

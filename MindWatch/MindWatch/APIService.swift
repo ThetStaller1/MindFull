@@ -160,9 +160,18 @@ class APIService {
         // Set user ID if available
         if let authToken = authToken,
            let userId = getUserIdFromToken(authToken) {
-            request.userInfo["personId"] = userId
+            request.userInfo["userId"] = userId
         } else {
             print("Warning: No user ID available for health data")
+        }
+        
+        // Load and apply user profile data
+        if let profileData = UserDefaults.standard.data(forKey: "user_profile"),
+           let profile = try? JSONDecoder().decode(UserProfile.self, from: profileData) {
+            request.updateWithUserProfile(profile)
+            print("Applied user profile: age=\(profile.getAge()), gender=\(profile.gender)")
+        } else {
+            print("Warning: No user profile found, using default values")
         }
         
         // Group health data by type
@@ -317,6 +326,17 @@ class APIService {
         }
         
         return nil
+    }
+    
+    // Helper method to load user profile from UserDefaults
+    private func loadUserProfile() -> UserProfile {
+        if let data = UserDefaults.standard.data(forKey: "user_profile") {
+            let decoder = JSONDecoder()
+            if let profile = try? decoder.decode(UserProfile.self, from: data) {
+                return profile
+            }
+        }
+        return UserProfile() // Return default profile if not found
     }
     
     // MARK: - Analysis Methods

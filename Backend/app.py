@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 import joblib
 import time
+import uuid
 
 # Import Supabase client
 from supabase_client import SupabaseClient
@@ -96,10 +97,15 @@ class HealthKitData(BaseModel):
     basalEnergy: List[Dict[str, Any]]
     flightsClimbed: List[Dict[str, Any]]
     userInfo: Dict[str, Any] = {
-        "personId": "1001",
         "age": 33,
         "genderBinary": 1  # Default: female
     }
+
+class UserProfileData(BaseModel):
+    userId: str
+    gender: str
+    birthdate: str
+    age: int
 
 class AnalysisResult(BaseModel):
     userId: str
@@ -128,8 +134,8 @@ class MentalHealthPredictor:
         logger.info(f"Loading model from: {model_path}")
         
         # Initialize feature lists
-        self.feature_names = None
-        self.feature_importance = None
+        self.model_feature_names = None
+        self.feature_importances = None
         self.expected_feature_count = None
         
         # Initialize the HealthKit extractor for data transformation
@@ -161,28 +167,28 @@ class MentalHealthPredictor:
         logger.info(f"Loading feature importance from: {feature_importance_path}")
         try:
             if os.path.exists(feature_importance_path):
-                self.feature_importance = pd.read_csv(feature_importance_path)
-                logger.info(f"Feature importance loaded with {len(self.feature_importance)} features")
+                self.feature_importances = pd.read_csv(feature_importance_path)
+                logger.info(f"Feature importance loaded with {len(self.feature_importances)} features")
                 
                 # Extract feature names from feature importance CSV
                 # We prioritize this since it has all 38 features the model expects
-                self.feature_names = self.feature_importance['feature'].tolist()
-                logger.info(f"Using feature names from importance file: {len(self.feature_names)} features")
+                self.model_feature_names = self.feature_importances['feature'].tolist()
+                logger.info(f"Using feature names from importance file: {len(self.model_feature_names)} features")
                 
                 # If we expect a certain number of features, verify we have them all
                 if self.expected_feature_count is not None:
-                    if len(self.feature_names) != self.expected_feature_count:
+                    if len(self.model_feature_names) != self.expected_feature_count:
                         logger.warning(
                             f"Feature count mismatch in feature_importance.csv. "
-                            f"Expected {self.expected_feature_count}, got {len(self.feature_names)}."
+                            f"Expected {self.expected_feature_count}, got {len(self.model_feature_names)}."
                         )
                         # Only add dummy features if absolutely necessary
-                        if len(self.feature_names) < self.expected_feature_count:
-                            missing_count = self.expected_feature_count - len(self.feature_names)
+                        if len(self.model_feature_names) < self.expected_feature_count:
+                            missing_count = self.expected_feature_count - len(self.model_feature_names)
                             logger.warning(f"Adding {missing_count} dummy features to match model requirements")
                             for i in range(missing_count):
-                                self.feature_names.append(f"dummy_feature_{i}")
-                            logger.info(f"Updated feature count: {len(self.feature_names)}")
+                                self.model_feature_names.append(f"dummy_feature_{i}")
+                            logger.info(f"Updated feature count: {len(self.model_feature_names)}")
             else:
                 logger.warning("Feature importance file not found, will check for feature_names.json instead")
         except Exception as e:
@@ -190,34 +196,34 @@ class MentalHealthPredictor:
             logger.warning("Will check for feature_names.json instead")
         
         # Only load feature_names.json if we still don't have feature names
-        if self.feature_names is None:
+        if self.model_feature_names is None:
             feature_names_path = os.path.join(os.path.dirname(__file__), "model", "feature_names.json")
             logger.info(f"Loading feature names from: {feature_names_path}")
             try:
                 if os.path.exists(feature_names_path):
                     with open(feature_names_path, 'r') as f:
-                        self.feature_names = json.load(f)
-                    logger.info(f"Feature names loaded from JSON: {len(self.feature_names)} features")
+                        self.model_feature_names = json.load(f)
+                    logger.info(f"Feature names loaded from JSON: {len(self.model_feature_names)} features")
                     
                     # If model expects more features than we have, add dummy features
-                    if self.expected_feature_count is not None and len(self.feature_names) < self.expected_feature_count:
-                        missing_count = self.expected_feature_count - len(self.feature_names)
+                    if self.expected_feature_count is not None and len(self.model_feature_names) < self.expected_feature_count:
+                        missing_count = self.expected_feature_count - len(self.model_feature_names)
                         logger.warning(f"Adding {missing_count} dummy features to match model requirements")
                         for i in range(missing_count):
                             dummy_name = f"dummy_feature_{i}"
-                            if dummy_name not in self.feature_names:
-                                self.feature_names.append(dummy_name)
-                        logger.info(f"Updated feature count: {len(self.feature_names)}")
+                            if dummy_name not in self.model_feature_names:
+                                self.model_feature_names.append(dummy_name)
+                        logger.info(f"Updated feature count: {len(self.model_feature_names)}")
                 else:
                     logger.warning("Feature names file not found, cannot determine feature list")
             except Exception as e:
                 logger.error(f"Error loading feature names: {e}")
         
         # Final check to ensure we have the feature names
-        if self.feature_names is None:
+        if self.model_feature_names is None:
             logger.warning("No feature names available from any source, this will likely cause prediction errors")
         else:
-            logger.info(f"Final feature set has {len(self.feature_names)} features: {self.feature_names[:5]}...")
+            logger.info(f"Final feature set has {len(self.model_feature_names)} features: {self.model_feature_names[:5]}...")
             
         logger.info("Mental Health Predictor initialized successfully")
     
@@ -227,12 +233,7 @@ class MentalHealthPredictor:
         
         try:
             # Use the HealthKit extractor to process the data consistently with test code
-            features_df = self.extractor.process_healthkit_data(
-                health_data,
-                person_id=health_data.userInfo.get('personId', '1001'),
-                age=health_data.userInfo.get('age', 33),
-                gender_binary=health_data.userInfo.get('genderBinary', 1)
-            )
+            features_df = self.extractor.process_healthkit_data(health_data)
             
             # Log the feature information without dumping large dataframes
             logger.info(f"Features extracted successfully: shape={features_df.shape}")
@@ -249,13 +250,12 @@ class MentalHealthPredictor:
             
             # Create base dataframe with user info
             fallback_features_df = pd.DataFrame({
-                'person_id': [health_data.userInfo.get('personId', '1001')],
                 'age': [health_data.userInfo.get('age', 33)],
                 'gender_binary': [health_data.userInfo.get('genderBinary', 1)]
             })
             
             # Add dummy values for required features
-            for feature in self.feature_names:
+            for feature in self.model_feature_names:
                 if feature not in fallback_features_df.columns and feature != 'person_id':
                     fallback_features_df[feature] = 0
             
@@ -263,112 +263,107 @@ class MentalHealthPredictor:
             return fallback_features_df
     
     def predict(self, health_data: HealthKitData) -> AnalysisResult:
-        """Process health data and make a prediction"""
-        # Transform HealthKit data to features
-        features_df = self.transform_data(health_data)
+        """
+        Run prediction using the mental health model
         
-        # Log the input data shape
-        logger.info(f"Input feature dataframe shape: {features_df.shape}")
-        
-        # Drop person_id before prediction (if it exists) - EXACTLY as in test_mental_health_model.py
-        X = features_df.drop('person_id', axis=1) if 'person_id' in features_df.columns else features_df
-        
-        # Log summarized feature information instead of full columns
-        feature_summary = f"{len(X.columns)} features (first 5: {X.columns[:5].tolist()}...)"
-        logger.info(f"Using {feature_summary}")
-        
-        # Check if we need to reorder/filter columns to match training data
-        if self.feature_names is not None:
-            # Add missing columns expected by the model
-            missing_cols = [col for col in self.feature_names if col not in X.columns]
-            if missing_cols:
-                missing_count = len(missing_cols)
-                logger.warning(f"Missing {missing_count} features expected by model")
-                if logger.level <= logging.DEBUG and missing_cols:  # Only log at DEBUG level
-                    logger.debug(f"First 5 missing features: {missing_cols[:5]}...")
-                
-                # Add missing columns with zero values
-                for col in missing_cols:
-                    X[col] = 0
+        Args:
+            health_data: Processed health data in HealthKitData format
             
-            # Keep only the features expected by the model, in the correct order
-            try:
-                X = X[self.feature_names]
-                logger.info(f"Using {len(self.feature_names)} feature columns for prediction")
-            except KeyError as e:
-                logger.error(f"KeyError when selecting features: {e}")
-                # Handle case where feature names might be wrong
-                # Get common features between what we have and what we need
-                common_features = [col for col in self.feature_names if col in X.columns]
-                logger.info(f"Falling back to {len(common_features)} common features")
-                X = X[common_features]
-                # Add any remaining needed features as zeros
-                for col in set(self.feature_names) - set(common_features):
-                    X[col] = 0
-                # Reorder columns to match feature_names
-                X = X[self.feature_names]
-            
-            # Check if model expects specific number of features
-            if self.expected_feature_count is not None:
-                if X.shape[1] != self.expected_feature_count:
-                    logger.warning(f"Feature count mismatch. Model expects {self.expected_feature_count}, got {X.shape[1]}. Adjusting...")
-                    
-                    if X.shape[1] < self.expected_feature_count:
-                        # Add dummy features with zeros if needed
-                        missing_feature_count = self.expected_feature_count - X.shape[1]
-                        for i in range(missing_feature_count):
-                            feature_name = f"dummy_feature_{i}"
-                            if feature_name not in X.columns:
-                                X[feature_name] = 0
-                        logger.info(f"Added {missing_feature_count} dummy features. New shape: {X.shape}")
-                    elif X.shape[1] > self.expected_feature_count:
-                        # Too many features - need to remove some
-                        # This should not happen with proper feature_names, but just in case
-                        logger.warning(f"Too many features ({X.shape[1]}), trimming to {self.expected_feature_count}")
-                        X = X.iloc[:, :self.expected_feature_count]
-        
-        # Make prediction with the model - EXACTLY as in test_mental_health_model.py
+        Returns:
+            AnalysisResult: Prediction with risk level and contributing factors
+        """
         try:
-            prediction_proba = self.model.predict_proba(X)[:, 1]
-            prediction_class = self.model.predict(X)
+            # Get userId from the health data if available, otherwise generate a unique ID
+            user_id = health_data.userInfo.get("personId") or health_data.userInfo.get("userId", str(uuid.uuid4()))
             
-            # Log prediction details
-            logger.info(f"Prediction result: class={prediction_class[0]}, probability={prediction_proba[0]:.4f}")
+            # Extract features from the health data
+            logger.info("Transforming health data using HealthKit extractor...")
+            features_df = self.transform_data(health_data)
+
+            if features_df.empty:
+                logger.error("Failed to extract features from health data")
+                # Return a default result
+                return AnalysisResult(
+                    userId=user_id,
+                    prediction=0,
+                    riskLevel="UNKNOWN",
+                    riskScore=0.0,
+                    contributingFactors={},
+                    analysisDate=datetime.now().isoformat()
+                )
+                
+            # Log the shape of the features dataframe
+            logger.info(f"Features extracted successfully: shape={features_df.shape}")
+            # Log the columns
+            logger.info(f"Input feature dataframe shape: {features_df.shape}")
+            logger.info(f"Using {len(features_df.columns)} features (first 5: {list(features_df.columns)[:5]}...)")
             
-            # Get binary classification result - EXACTLY as in test_mental_health_model.py
-            if prediction_proba[0] < 0.5:
-                risk_level = "NEGATIVE"  # Control group (no disorder)
+            # Check if features match what the model expects
+            if len(features_df.columns) < len(self.model_feature_names):
+                missing_features = [f for f in self.model_feature_names if f not in features_df.columns]
+                logger.warning(f"Missing {len(missing_features)} features expected by model")
+                
+                # Add missing features with default values (0)
+                for feature in missing_features:
+                    features_df[feature] = 0
+            
+            # Ensure columns are in the expected order for the model
+            # Only include columns used in the model
+            model_features = features_df.reindex(columns=self.model_feature_names, fill_value=0)
+            logger.info(f"Using {len(model_features.columns)} feature columns for prediction")
+            
+            # Make prediction
+            y_pred_proba = self.model.predict_proba(model_features)
+            y_pred = self.model.predict(model_features)
+            prediction = int(y_pred[0])
+            probability = y_pred_proba[0][1]  # Probability of class 1
+            
+            logger.info(f"Prediction result: class={prediction}, probability={probability:.4f}")
+            
+            # Get feature importance
+            importance_dict = {}
+            if hasattr(self.model, 'feature_importances_'):
+                importances = self.model.feature_importances_
             else:
-                risk_level = "POSITIVE"  # Subject group (has disorder)
+                # For models that don't have feature_importances_
+                importances = self.feature_importances
                 
-            # Get top contributing features - EXACTLY as in test_mental_health_model.py
-            contributing_features = {}
-            if self.feature_importance is not None:
-                # Get top features by importance
-                top_features = self.feature_importance.sort_values('importance', ascending=False).head(10)
-                
-                for _, row in top_features.iterrows():
-                    feature_name = row['feature']
-                    importance = row['importance']
-                    contributing_features[feature_name] = importance
+            # Create a dictionary of feature importances
+            if len(importances) == len(self.model_feature_names):
+                # Normalize the importances to sum to 1
+                importances_sum = sum(importances)
+                if importances_sum > 0:
+                    normalized_importances = [imp / importances_sum for imp in importances]
+                    importance_dict = dict(zip(self.model_feature_names, normalized_importances))
+                    
+                    # Sort by importance and take top 10
+                    importance_dict = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:10])
             
-            # Create result - EXACTLY as in test_mental_health_model.py format
+            # Return the result
+            risk_level = "POSITIVE" if prediction == 1 else "NEGATIVE"
+            
             result = AnalysisResult(
-                userId=health_data.userInfo.get('personId', '1001'),
-                prediction=int(prediction_class[0]),
+                userId=user_id,
+                prediction=prediction,
                 riskLevel=risk_level,
-                riskScore=float(prediction_proba[0]),
-                contributingFactors=contributing_features,
+                riskScore=float(probability),
+                contributingFactors=importance_dict,
                 analysisDate=datetime.now().isoformat()
             )
             
-            # Log the risk assessment result
-            logger.info(f"Analysis complete. Risk level: {result.riskLevel}, Score: {result.riskScore:.2f}")
-            
             return result
+            
         except Exception as e:
-            logger.error(f"Error making prediction: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+            logger.error(f"Error during prediction: {str(e)}", exc_info=True)
+            # Return a default result in case of errors
+            return AnalysisResult(
+                userId=user_id if 'user_id' in locals() else str(uuid.uuid4()),
+                prediction=0,
+                riskLevel="ERROR",
+                riskScore=0.0,
+                contributingFactors={},
+                analysisDate=datetime.now().isoformat()
+            )
 
 # Lazy-load our predictor and Supabase client
 @app.on_event("startup")
@@ -413,16 +408,16 @@ async def validate_auth(request: Request, auth_token: Optional[str] = Header(Non
     
     # Validate token with Supabase
     supabase = get_supabase()
-    validation_result = supabase.validate_token(auth_token)
+    validation_result = supabase.get_user_from_token(auth_token)
     
-    if not validation_result.get('valid', False):
-        logger.error(f"Invalid auth token: {validation_result.get('error', 'Unknown error')}")
+    if not validation_result.get('success', False):
+        logger.error(f"Invalid auth token: {validation_result.get('message', 'Unknown error')}")
         raise HTTPException(status_code=401, detail="Invalid authentication token")
     
     # Return user info from the token
     return {
-        "user_id": validation_result['user']['id'],
-        "email": validation_result['user']['email']
+        "user_id": validation_result['user_id'],
+        "email": validation_result['email']
     }
 
 # Authentication routes
@@ -432,17 +427,26 @@ async def register(user_data: UserRegister, supabase: SupabaseClient = Depends(g
     try:
         result = supabase.register_user(user_data.email, user_data.password)
         
-        if "error" in result:
-            logger.error(f"Registration failed: {result['error']}")
-            raise HTTPException(status_code=400, detail=result["error"])
+        if not result.get("success", False):
+            logger.error(f"Registration failed: {result.get('message', 'Unknown error')}")
+            raise HTTPException(status_code=400, detail=result.get("message", "Registration failed"))
+        
+        # For now, we'll construct a placeholder token since we don't get session info from register_user
+        # In a production app, you'd want to modify register_user to return proper session data
+        # or immediately call login_user after registration
+        login_result = supabase.login_user(user_data.email, user_data.password)
+        
+        if not login_result.get("success", False):
+            logger.error(f"Auto-login after registration failed: {login_result.get('message', 'Unknown error')}")
+            raise HTTPException(status_code=400, detail="Registration successful but login failed")
         
         return TokenData(
-            access_token=result["session"]["access_token"],
-            refresh_token=result["session"]["refresh_token"],
-            expires_at=result["session"]["expires_at"],
+            access_token=login_result["access_token"],
+            refresh_token="", # Not returned in our simplified version
+            expires_at=int(time.time()) + 3600, # Placeholder expiry, 1 hour from now
             user=UserInfo(
-                id=result["user"]["id"],
-                email=result["user"]["email"]
+                id=result["user_id"],
+                email=user_data.email
             )
         )
     except Exception as e:
@@ -455,17 +459,17 @@ async def login(user_data: UserLogin, supabase: SupabaseClient = Depends(get_sup
     try:
         result = supabase.login_user(user_data.email, user_data.password)
         
-        if "error" in result:
-            logger.error(f"Login failed: {result['error']}")
-            raise HTTPException(status_code=400, detail=result["error"])
+        if not result.get("success", False):
+            logger.error(f"Login failed: {result.get('message', 'Unknown error')}")
+            raise HTTPException(status_code=400, detail=result.get("message", "Login failed"))
         
         return TokenData(
-            access_token=result["session"]["access_token"],
-            refresh_token=result["session"]["refresh_token"],
-            expires_at=result["session"]["expires_at"],
+            access_token=result["access_token"],
+            refresh_token="", # Not returned in our simplified version
+            expires_at=int(time.time()) + 3600, # Placeholder expiry, 1 hour from now
             user=UserInfo(
-                id=result["user"]["id"],
-                email=result["user"]["email"]
+                id=result["user_id"],
+                email=user_data.email
             )
         )
     except Exception as e:
@@ -522,6 +526,7 @@ async def analyze_health_data(
         # Set the user ID from auth in the health data
         user_id = auth_info["user_id"]
         health_data.userInfo["personId"] = user_id
+        health_data.userInfo["userId"] = user_id
         
         # Step 1: Check existing data completeness before storing new data
         logger.info(f"Checking existing data completeness for user {user_id}")
@@ -551,7 +556,7 @@ async def analyze_health_data(
                 last_date = latest_timestamps['heartRate']
                 health_data.heartRate = [
                     record for record in health_data.heartRate 
-                    if datetime.fromisoformat(record['startDate'].replace('Z', '+00:00')) > last_date
+                    if datetime.fromisoformat(record['startDate'].replace('Z', '+00:00')).replace(tzinfo=None) > last_date
                 ]
                 if len(health_data.heartRate) > 0:
                     has_new_data = True
@@ -566,7 +571,7 @@ async def analyze_health_data(
                 last_date = latest_timestamps['steps']
                 health_data.steps = [
                     record for record in health_data.steps 
-                    if datetime.fromisoformat(record['endDate'].replace('Z', '+00:00')) > last_date
+                    if datetime.fromisoformat(record['endDate'].replace('Z', '+00:00')).replace(tzinfo=None) > last_date
                 ]
                 if len(health_data.steps) > 0:
                     has_new_data = True
@@ -581,7 +586,7 @@ async def analyze_health_data(
                 last_date = latest_timestamps['activeEnergy']
                 health_data.activeEnergy = [
                     record for record in health_data.activeEnergy 
-                    if datetime.fromisoformat(record['endDate'].replace('Z', '+00:00')) > last_date
+                    if datetime.fromisoformat(record['endDate'].replace('Z', '+00:00')).replace(tzinfo=None) > last_date
                 ]
                 if len(health_data.activeEnergy) > 0:
                     has_new_data = True
@@ -596,7 +601,7 @@ async def analyze_health_data(
                 last_date = latest_timestamps['sleep']
                 health_data.sleep = [
                     record for record in health_data.sleep 
-                    if datetime.fromisoformat(record['startDate'].replace('Z', '+00:00')) > last_date
+                    if datetime.fromisoformat(record['startDate'].replace('Z', '+00:00')).replace(tzinfo=None) > last_date
                 ]
                 if len(health_data.sleep) > 0:
                     has_new_data = True
@@ -611,7 +616,7 @@ async def analyze_health_data(
                 last_date = latest_timestamps['workout']
                 health_data.workout = [
                     record for record in health_data.workout 
-                    if datetime.fromisoformat(record['startDate'].replace('Z', '+00:00')) > last_date
+                    if datetime.fromisoformat(record['startDate'].replace('Z', '+00:00')).replace(tzinfo=None) > last_date
                 ]
                 if len(health_data.workout) > 0:
                     has_new_data = True
@@ -709,14 +714,19 @@ async def analyze_health_data(
         
         # Check if we have enough data for analysis - require at least one primary data type
         required_data_types = ["heartRate", "steps", "sleep"]
-        available_required = [
-            "heartRate" if len(supabase_health_model.heartRate) > 0 else None,
-            "steps" if len(supabase_health_model.steps) > 0 else None,
-            "sleep" if len(supabase_health_model.sleep) > 0 else None
-        ]
-        available_required = [dt for dt in available_required if dt is not None]
+        available_required = {
+            "heartRate": len(supabase_health_model.heartRate) > 0,
+            "steps": len(supabase_health_model.steps) > 0, 
+            "sleep": len(supabase_health_model.sleep) > 0
+        }
         
-        if not available_required:
+        available_data_types = [dt for dt, has_data in available_required.items() if has_data]
+        missing_data_types = [dt for dt, has_data in available_required.items() if not has_data]
+        
+        logger.info(f"Available data types: {available_data_types}")
+        logger.info(f"Missing data types: {missing_data_types}")
+        
+        if not available_data_types:
             error_msg = "Insufficient health data for analysis. At least one of heart rate, steps, or sleep data is required."
             logger.error(error_msg)
             
@@ -730,15 +740,20 @@ async def analyze_health_data(
                 } for dt, cov in coverage_summary.items() if dt in required_data_types
             }
             
-            raise HTTPException(
-                status_code=400, 
-                detail={
+            # Return a structured error response that still matches the AnalysisResult format
+            # so the iOS app can display a meaningful message
+            return AnalysisResult(
+                userId=user_id,
+                prediction=0,
+                riskLevel="INSUFFICIENT_DATA",
+                riskScore=0.0,
+                contributingFactors={
+                    "error": 1.0,
                     "message": error_msg,
-                    "required_data_types": required_data_types,
-                    "available_data_types": available_required,
-                    "missing_details": missing_details,
-                    "suggestion": "Please sync more health data from your Apple Watch and try again."
-                }
+                    "missingDataTypes": {dt: 1.0 for dt in missing_data_types},
+                    "availableDataTypes": {dt: 1.0 for dt in available_data_types}
+                },
+                analysisDate=datetime.now().isoformat()
             )
         
         # Step 5: Run the prediction using data from Supabase
@@ -747,12 +762,20 @@ async def analyze_health_data(
         
         # Step 6: Store analysis result in Supabase
         logger.info(f"Storing analysis result for user {user_id}")
-        supabase.store_analysis_result(result.dict())
         
-        # Add data coverage information to the result
-        result_dict = result.dict()
-        result_dict["dataQuality"] = {
-            "qualityScore": completeness_check.get("quality_score", 0),
+        # Create a result dictionary with fields that match the Supabase schema
+        result_dict = {
+            "userId": result.userId,
+            "prediction": result.prediction,
+            "riskLevel": result.riskLevel,
+            "riskScore": result.riskScore,
+            "contributingFactors": result.contributingFactors,
+            "analysisDate": result.analysisDate
+        }
+        
+        # Add data quality information to the result
+        data_quality = {
+            "qualityScore": updated_completeness.get('quality_score', 0) if 'updated_completeness' in locals() else completeness_check.get('quality_score', 0),
             "dataTypes": {
                 "heartRate": len(supabase_health_model.heartRate) > 0,
                 "steps": len(supabase_health_model.steps) > 0,
@@ -760,10 +783,28 @@ async def analyze_health_data(
                 "sleep": len(supabase_health_model.sleep) > 0,
                 "workout": len(supabase_health_model.workout) > 0
             },
-            "message": f"Analysis based on {len(available_required)}/{len(required_data_types)} required data types."
+            "message": f"Analysis based on {len(available_data_types)}/{len(required_data_types)} required data types."
         }
         
+        # Add the data quality information to contributing factors
+        if result_dict["contributingFactors"] is None:
+            result_dict["contributingFactors"] = {}
+        result_dict["contributingFactors"]["dataQuality"] = data_quality
+        
+        try:
+            logger.info(f"Saving analysis result to Supabase for user {user_id}")
+            save_success = supabase.save_analysis_result(user_id, result_dict)
+            if save_success:
+                logger.info("Successfully saved analysis result to database.")
+            else:
+                logger.warning("Failed to save analysis result to database. Continuing anyway.")
+        except Exception as e:
+            logger.error(f"Error during analysis result saving: {e}", exc_info=True)
+            # Don't fail the request just because saving failed
+        
         logger.info(f"Analysis complete. Risk level: {result.riskLevel}, Score: {result.riskScore:.2f}")
+        
+        # Return the result object directly - the iOS app expects this format
         return result
     except HTTPException:
         # Re-raise HTTP exceptions without modification
@@ -803,6 +844,7 @@ async def check_analysis(
 
 @app.get("/latest-analysis/{user_id}")
 async def get_latest_analysis(
+    request: Request,
     user_id: str,
     supabase: SupabaseClient = Depends(get_supabase),
     auth_info: dict = Depends(validate_auth)
@@ -821,12 +863,55 @@ async def get_latest_analysis(
         latest_analysis = supabase.get_latest_analysis(user_id)
         
         if not latest_analysis:
+            logger.info(f"No analysis results found for user {user_id}")
+            
+            # For iOS app compatibility, if this is a direct request from the app,
+            # return a properly formatted empty result instead of a custom object
+            user_agent = request.headers.get("user-agent", "").lower()
+            if "cfnetwork" in user_agent or "darwin" in user_agent:
+                return AnalysisResult(
+                    userId=user_id,
+                    prediction=0,
+                    riskLevel="NO_DATA",
+                    riskScore=0.0,
+                    contributingFactors={},
+                    analysisDate=datetime.now().isoformat()
+                )
+                
             return {
                 "userId": user_id,
                 "hasAnalysis": False,
                 "message": "No analysis results found for this user"
             }
         
+        # Ensure all required fields are present for the iOS app
+        required_fields = ["riskScore", "riskLevel", "analysisDate", "contributingFactors"]
+        for field in required_fields:
+            if field not in latest_analysis:
+                logger.warning(f"Missing required field '{field}' in analysis result")
+                if field == "contributingFactors":
+                    latest_analysis[field] = {}
+                elif field == "riskScore":
+                    latest_analysis[field] = 0.0
+                elif field == "riskLevel":
+                    latest_analysis[field] = "UNKNOWN"
+                elif field == "analysisDate":
+                    latest_analysis[field] = datetime.now().isoformat()
+        
+        # Ensure the userId is consistent with the requested user
+        latest_analysis["userId"] = user_id
+        
+        logger.info(f"Returning analysis result: {latest_analysis}")
+        
+        # For iOS app compatibility, if this is a direct request from the app,
+        # return the analysis result directly, not wrapped in a container
+        user_agent = request.headers.get("user-agent", "").lower()
+        if "cfnetwork" in user_agent or "darwin" in user_agent:
+            # This is likely a request from the iOS app
+            logger.info("iOS app detected, returning direct format")
+            return latest_analysis
+        
+        # Otherwise return the wrapped format
         return {
             "userId": user_id,
             "hasAnalysis": True,
@@ -1158,6 +1243,42 @@ async def data_collection_guidance(
                 "Ensure your Apple Watch has sufficient battery life for continuous tracking"
             ]
         }
+
+@app.post("/update-profile")
+async def update_profile(
+    profile_data: UserProfileData,
+    supabase: SupabaseClient = Depends(get_supabase),
+    auth_info: dict = Depends(validate_auth)
+):
+    """Update user profile with gender and birth date"""
+    try:
+        # Ensure user can only update their own profile
+        if profile_data.userId != auth_info["user_id"]:
+            raise HTTPException(status_code=403, detail="Not authorized to update this user's profile")
+        
+        user_id = auth_info["user_id"]
+        
+        # Store profile data in Supabase
+        success = supabase.update_user_profile(
+            user_id=user_id,
+            gender=profile_data.gender,
+            birthdate=profile_data.birthdate,
+            age=profile_data.age
+        )
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update profile")
+        
+        return {
+            "userId": user_id,
+            "success": True,
+            "message": "Profile updated successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating profile: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Profile update failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

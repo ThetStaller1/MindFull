@@ -2,7 +2,7 @@ import os
 import logging
 import json
 from typing import Dict, List, Any, Optional
-from supabase import create_client
+from supabase import create_client, Client
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -29,14 +29,16 @@ class SupabaseClient:
             raise ValueError("Supabase URL must be set in environment variables")
         
         try:
-            # Create client with service role key for all backend operations
-            # This allows us to bypass RLS policies for server-side operations
+            # Create primary client - may be used for auth operations
             self.client = create_client(self.supabase_url, self.service_role_key)
             
-            # Service client is the same as primary client since we're using service role for everything
-            self.service_client = self.client
-                
-            logger.info("Supabase client initialized with service role key")
+            # Create dedicated service client that will NEVER be used for auth operations
+            # This ensures it won't get a session token that overrides the service role
+            self.service_client = create_client(self.supabase_url, self.service_role_key)
+            
+            # Log the key value (first few chars) to help troubleshoot
+            masked_key = self.service_role_key[:5] + "..." if self.service_role_key else None
+            logger.info(f"Supabase client initialized with service role key: {masked_key}")
         except Exception as e:
             logger.error(f"Error initializing Supabase client: {str(e)}")
             self.client = None
@@ -44,100 +46,116 @@ class SupabaseClient:
     
     # Authentication methods
     def register_user(self, email: str, password: str) -> Dict[str, Any]:
-        """Register a new user with Supabase Auth"""
+        """
+        Register a new user with email and password
+        
+        Args:
+            email (str): User's email
+            password (str): User's password
+            
+        Returns:
+            dict: User data if successful, error message otherwise
+        """
         try:
-            response = self.client.auth.sign_up({
+            logger.info(f"Registering new user with email: {email}")
+            
+            # Create user with Supabase Auth
+            response = self.service_client.auth.sign_up({
                 "email": email,
-                "password": password
+                "password": password,
             })
             
-            if response.user and response.session:
-                logger.info(f"Successfully registered user: {email}")
+            logger.info(f"User registration response received")
+            
+            if hasattr(response, 'user') and response.user:
+                # User registered successfully
+                user_id = response.user.id
                 
-                # Create a profile entry in the profiles table
-                if response.user.id:
-                    try:
-                        self.client.table('profiles').insert({
-                            'id': response.user.id,
-                            'email': email,
-                            'created_at': datetime.now().isoformat(),
-                            'updated_at': datetime.now().isoformat()
-                        }).execute()
-                        logger.info(f"Created profile for user: {email}")
-                    except Exception as e:
-                        logger.error(f"Error creating profile for new user: {str(e)}")
+                # In a real app, we'd need to handle email verification here
+                # depending on your Supabase configuration
                 
-                return {
-                    "user": {
-                        "id": response.user.id,
-                        "email": response.user.email
-                    },
-                    "session": {
-                        "access_token": response.session.access_token,
-                        "refresh_token": response.session.refresh_token,
-                        "expires_at": response.session.expires_at
-                    }
-                }
+                return {"success": True, "user_id": user_id, "message": "User registered successfully"}
             else:
-                error_msg = "Failed to register user: No user or session in response"
-                logger.error(error_msg)
-                return {"error": error_msg}
+                logger.error(f"User registration failed: {response}")
+                return {"success": False, "message": "User registration failed"}
                 
         except Exception as e:
-            error_msg = f"Error registering user: {str(e)}"
-            logger.error(error_msg)
-            return {"error": error_msg}
+            logger.error(f"Error registering user: {str(e)}")
+            return {"success": False, "message": str(e)}
     
     def login_user(self, email: str, password: str) -> Dict[str, Any]:
-        """Log in an existing user with Supabase Auth"""
+        """
+        Login a user with email and password
+        
+        Args:
+            email (str): User's email
+            password (str): User's password
+            
+        Returns:
+            dict: User data and access token if successful, error message otherwise
+        """
         try:
-            response = self.client.auth.sign_in_with_password({
+            logger.info(f"Logging in user with email: {email}")
+            
+            # Authenticate user with Supabase Auth
+            response = self.service_client.auth.sign_in_with_password({
                 "email": email,
-                "password": password
+                "password": password,
             })
             
-            if response.user and response.session:
-                logger.info(f"Successfully logged in user: {email}")
+            if hasattr(response, 'user') and response.user:
+                # User logged in successfully
+                user_id = response.user.id
+                access_token = response.session.access_token
+                
                 return {
-                    "user": {
-                        "id": response.user.id,
-                        "email": response.user.email
-                    },
-                    "session": {
-                        "access_token": response.session.access_token,
-                        "refresh_token": response.session.refresh_token,
-                        "expires_at": response.session.expires_at
-                    }
+                    "success": True, 
+                    "user_id": user_id, 
+                    "access_token": access_token, 
+                    "message": "User logged in successfully"
                 }
             else:
-                error_msg = "Failed to log in: No user or session in response"
-                logger.error(error_msg)
-                return {"error": error_msg}
+                logger.error(f"User login failed: {response}")
+                return {"success": False, "message": "Invalid credentials"}
                 
         except Exception as e:
-            error_msg = f"Error logging in user: {str(e)}"
-            logger.error(error_msg)
-            return {"error": error_msg}
+            logger.error(f"Error logging in user: {str(e)}")
+            return {"success": False, "message": str(e)}
     
-    def validate_token(self, token: str) -> Dict[str, Any]:
-        """Validate a JWT token from Supabase Auth"""
-        try:
-            response = self.client.auth.get_user(token)
+    def get_user_from_token(self, token: str) -> Dict[str, Any]:
+        """
+        Get user data from token
+        
+        Args:
+            token (str): User's access token
             
-            if response and response.user:
-                logger.info(f"Successfully validated token for user: {response.user.id}")
+        Returns:
+            dict: User data if token is valid, error message otherwise
+        """
+        try:
+            logger.info(f"Getting user from token")
+            
+            # Authenticate user with Supabase Auth
+            response = self.service_client.auth.get_user(token)
+            
+            if hasattr(response, 'user') and response.user:
+                # Token is valid
+                user_id = response.user.id
+                email = response.user.email
+                
                 return {
-                    "valid": True,
-                    "user": {
-                        "id": response.user.id,
-                        "email": response.user.email
-                    }
+                    "success": True, 
+                    "user_id": user_id, 
+                    "email": email, 
+                    "message": "Token is valid"
                 }
             else:
-                return {"valid": False, "error": "Invalid token"}
+                logger.error(f"Invalid token: {response}")
+                return {"success": False, "message": "Invalid token"}
+                
         except Exception as e:
-            logger.error(f"Error validating token: {str(e)}")
-            return {"valid": False, "error": str(e)}
+            logger.error(f"Error getting user from token: {str(e)}")
+            return {"success": False, "message": str(e)}
     
     def store_health_data(self, health_data: Dict[str, Any], user_id: str) -> bool:
         """
@@ -321,19 +339,19 @@ class SupabaseClient:
                             except:
                                 value = 0
                         
-                        # Create sleep record
+                        # Create sleep record - ensure all duration fields are integers
                         sleep_record = {
                             'person_id': user_id,
                             'sleep_date': date_str,
                             'is_main_sleep': True,  # Default to main sleep
-                            'minute_in_bed': int(value) + 30,  # Asleep + awake
-                            'minute_asleep': int(value),
+                            'minute_in_bed': int(float(value) + 30),  # Asleep + awake, ensure integer
+                            'minute_asleep': int(float(value)),  # Ensure integer
                             'minute_after_wakeup': 10,  # Default placeholder
                             'minute_awake': 20,  # Placeholder estimate
                             'minute_restless': 10,  # Placeholder estimate
-                            'minute_deep': int(value) * 0.2,  # Placeholder: ~20% of sleep is deep
-                            'minute_light': int(value) * 0.5,  # Placeholder: ~50% of sleep is light
-                            'minute_rem': int(value) * 0.3,  # Placeholder: ~30% of sleep is REM
+                            'minute_deep': int(float(value) * 0.2),  # Ensure integer
+                            'minute_light': int(float(value) * 0.5),  # Ensure integer
+                            'minute_rem': int(float(value) * 0.3),  # Ensure integer
                             'minute_wake': 20  # Same as minute_awake for consistency
                         }
                         
@@ -427,55 +445,360 @@ class SupabaseClient:
             logger.error(f"Error storing health data: {str(e)}", exc_info=True)
             return False
     
-    def store_analysis_result(self, result: Dict[str, Any]) -> bool:
-        """Store analysis result in Supabase"""
+    def save_analysis_result(self, user_id: str, analysis_result: Dict[str, Any]) -> bool:
+        """Save mental health analysis result to Supabase"""
         try:
-            user_id = result.get('userId')
-            prediction = result.get('prediction')
-            risk_level = result.get('riskLevel')
-            risk_score = result.get('riskScore')
-            contributing_factors = result.get('contributingFactors', {})
-            analysis_date = result.get('analysisDate')
-            
-            # Validate required fields
-            if not all([user_id, prediction is not None, risk_level, risk_score is not None, analysis_date]):
-                logger.error("Missing required fields in analysis result")
+            # Ensure we have the required fields from the result
+            if "riskScore" not in analysis_result or "riskLevel" not in analysis_result:
+                logger.error(f"Missing required fields in analysis_result: {analysis_result.keys()}")
                 return False
-            
-            # Use service_role client to bypass RLS policies
-            # This ensures we can write data for any user without permission issues
-            self.service_client.table('analysis_results').insert({
+                
+            # Map fields from the API format to the database format
+            record = {
                 'person_id': user_id,
-                'prediction': prediction,
-                'risk_level': risk_level,
-                'risk_score': risk_score,
-                'contributing_factors': contributing_factors,
-                'analysis_date': analysis_date,
+                'analysis_date': datetime.now().isoformat(),
+                'prediction': analysis_result.get('prediction', 0),
+                'risk_level': analysis_result.get('riskLevel', 'UNKNOWN'),
+                'risk_score': analysis_result.get('riskScore', 0),
+                'contributing_factors': json.dumps(analysis_result.get('contributingFactors', {})),
+                'created_at': datetime.now().isoformat(),
                 'last_update_date': datetime.now().isoformat()
-            }).execute()
+            }
             
-            logger.info(f"Successfully stored analysis result for user {user_id}")
+            logger.info(f"Saving analysis result: {record}")
+            
+            # Insert the record
+            result = self.service_client.table('analysis_results').insert(record).execute()
+            
+            if hasattr(result, 'error') and result.error:
+                logger.error(f"Error from Supabase when saving analysis: {result.error}")
+                return False
+                
+            logger.info(f"Analysis result saved for user {user_id}")
             return True
             
         except Exception as e:
-            logger.error(f"Error storing analysis result: {str(e)}", exc_info=True)
+            logger.error(f"Error saving analysis result: {str(e)}", exc_info=True)
+            return False
+
+    def upload_health_data(self, user_id: str, health_data: Dict[str, Any]) -> bool:
+        """
+        Upload health data from Apple Health to Supabase.
+        
+        Args:
+            user_id: The user ID to upload data for
+            health_data: Dictionary containing Apple Health data
+            
+        Returns:
+            True if upload was successful, False otherwise
+        """
+        try:
+            success = True
+            
+            # Upload person dataset if provided
+            if 'userInfo' in health_data and health_data['userInfo']:
+                user_info = health_data['userInfo']
+                
+                # Default values
+                gender = user_info.get('gender', 'UNKNOWN')
+                age = user_info.get('age', '')
+                
+                # For backward compatibility: old data might have genderBinary
+                if not gender or gender == 'UNKNOWN':
+                    gender_binary = user_info.get('genderBinary', 1)
+                    gender = 'FEMALE' if gender_binary == 1 else 'MALE'
+                
+                # Check if age is a string date or a number
+                age_str = str(age)
+                if age_str.isdigit():
+                    # Convert age number to a birthdate string
+                    birth_year = datetime.now().year - int(age_str)
+                    age = f"{birth_year}-01-01T00:00:00Z"
+                
+                # Create person record
+                person_record = {
+                    'person_id': user_id,
+                    'gender': gender,
+                    'age': age,
+                    'update_date': datetime.now().isoformat()
+                }
+                
+                try:
+                    # Upsert person record
+                    self.service_client.table('person_dataset').upsert(person_record).execute()
+                    logger.info(f"Updated person record for {user_id}")
+                except Exception as e:
+                    logger.error(f"Error upserting person record: {e}", exc_info=True)
+                    success = False
+            
+            # Process heart rate data
+            if 'heartRate' in health_data and health_data['heartRate']:
+                heart_rate_records = []
+                
+                for record in health_data['heartRate']:
+                    try:
+                        # Extract date from ISO format
+                        start_date = record.get('startDate', '')
+                        if 'T' in start_date:
+                            date_str = start_date.split('T')[0]
+                        else:
+                            date_str = datetime.now().strftime('%Y-%m-%d')
+                        
+                        # Get the value as a number
+                        value = record.get('value')
+                        if isinstance(value, str):
+                            try:
+                                value = float(value)
+                            except:
+                                value = 0
+                        
+                        # Create heart rate record
+                        heart_rate_record = {
+                            'person_id': user_id,
+                            'date': date_str,
+                            'avg_rate': value
+                            # Only include columns that exist in the database schema
+                        }
+                        
+                        heart_rate_records.append(heart_rate_record)
+                    except Exception as e:
+                        logger.warning(f"Error processing heart rate record: {e}")
+                
+                if heart_rate_records:
+                    try:
+                        # Insert records in batches for efficiency
+                        for i in range(0, len(heart_rate_records), 10):
+                            batch = heart_rate_records[i:i+10]
+                            self.service_client.table('fitbit_heart_rate_level').upsert(batch).execute()
+                        
+                        logger.info(f"Inserted {len(heart_rate_records)} heart rate records")
+                    except Exception as e:
+                        logger.error(f"Error inserting heart rate records: {e}", exc_info=True)
+                        success = False
+            
+            # Process step data
+            if 'steps' in health_data and health_data['steps']:
+                step_records = []
+                
+                for record in health_data['steps']:
+                    try:
+                        # Extract date from ISO format
+                        start_date = record.get('startDate', '')
+                        if 'T' in start_date:
+                            date_str = start_date.split('T')[0]
+                        else:
+                            date_str = datetime.now().strftime('%Y-%m-%d')
+                        
+                        # Get the value as a number
+                        value = record.get('value')
+                        if isinstance(value, str):
+                            try:
+                                value = float(value)
+                            except:
+                                value = 0
+                        
+                        # Create step record
+                        step_record = {
+                            'person_id': user_id,
+                            'date': date_str,
+                            'sum_steps': int(value)
+                            # Only include columns that exist in the database schema
+                        }
+                        
+                        step_records.append(step_record)
+                    except Exception as e:
+                        logger.warning(f"Error processing step record: {e}")
+                
+                if step_records:
+                    try:
+                        # Insert records in batches for efficiency
+                        for i in range(0, len(step_records), 10):
+                            batch = step_records[i:i+10]
+                            self.service_client.table('fitbit_intraday_steps').upsert(batch).execute()
+                        
+                        logger.info(f"Inserted {len(step_records)} step records")
+                    except Exception as e:
+                        logger.error(f"Error inserting step records: {e}", exc_info=True)
+                        success = False
+
+            # Process activity data
+            if 'activeEnergy' in health_data and health_data['activeEnergy']:
+                activity_records = []
+                
+                for record in health_data['activeEnergy']:
+                    try:
+                        # Extract date from ISO format
+                        start_date = record.get('startDate', '')
+                        if 'T' in start_date:
+                            date_str = start_date.split('T')[0]
+                        else:
+                            date_str = datetime.now().strftime('%Y-%m-%d')
+                        
+                        # Get the value as a number
+                        value = record.get('value')
+                        if isinstance(value, str):
+                            try:
+                                value = float(value)
+                            except:
+                                value = 0
+                        
+                        # Create activity record (starting with just calories)
+                        activity_record = {
+                            'person_id': user_id,
+                            'date': date_str,
+                            'activity_calories': int(value),
+                            'very_active_minutes': 0,  # Default until workout data is processed
+                            'fairly_active_minutes': 0,
+                            'lightly_active_minutes': 0,
+                            'sedentary_minutes': 1440  # Default to full day
+                        }
+                        
+                        activity_records.append(activity_record)
+                    except Exception as e:
+                        logger.warning(f"Error processing activity record: {e}")
+                
+                # Process workout data to update activity records
+                if 'workout' in health_data and health_data['workout']:
+                    for record in health_data['workout']:
+                        try:
+                            # Extract date from ISO format
+                            start_date = record.get('startDate', '')
+                            if 'T' in start_date:
+                                date_str = start_date.split('T')[0]
+                            else:
+                                continue  # Skip if we can't get a date
+                            
+                            # Get the duration in minutes
+                            duration = record.get('duration', 0)
+                            if isinstance(duration, str):
+                                try:
+                                    duration = float(duration)
+                                except:
+                                    duration = 0
+                            
+                            # Convert to minutes
+                            minutes = int(duration / 60)
+                            
+                            # Find matching record by date
+                            for activity_record in activity_records:
+                                if activity_record['date'] == date_str:
+                                    # Update active minutes
+                                    activity_record['very_active_minutes'] += minutes
+                                    # Reduce sedentary minutes
+                                    activity_record['sedentary_minutes'] = max(0, activity_record['sedentary_minutes'] - minutes)
+                                    break
+                        except Exception as e:
+                            logger.warning(f"Error processing workout record: {e}")
+                
+                if activity_records:
+                    try:
+                        # Insert records in batches for efficiency
+                        for i in range(0, len(activity_records), 10):
+                            batch = activity_records[i:i+10]
+                            self.service_client.table('fitbit_activity').upsert(batch).execute()
+                        
+                        logger.info(f"Inserted {len(activity_records)} activity records")
+                    except Exception as e:
+                        logger.error(f"Error inserting activity records: {e}", exc_info=True)
+                        success = False
+            
+            # Process sleep data
+            if 'sleep' in health_data and health_data['sleep']:
+                sleep_records = []
+                
+                for record in health_data['sleep']:
+                    try:
+                        # Extract date from ISO format
+                        start_date = record.get('startDate', '')
+                        if 'T' in start_date:
+                            date_str = start_date.split('T')[0]
+                        else:
+                            date_str = datetime.now().strftime('%Y-%m-%d')
+                        
+                        # Get the value as a number
+                        value = record.get('value')
+                        if isinstance(value, str):
+                            try:
+                                value = float(value)
+                            except:
+                                value = 0
+                        
+                        # Create sleep record
+                        sleep_record = {
+                            'person_id': user_id,
+                            'sleep_date': date_str,
+                            'is_main_sleep': True,  # Default to main sleep
+                            'minute_in_bed': int(value) + 30,  # Asleep + awake
+                            'minute_asleep': int(value),
+                            'minute_after_wakeup': 10,  # Default placeholder
+                            'minute_awake': 20,  # Placeholder estimate
+                            'minute_restless': 10,  # Placeholder estimate
+                            'minute_deep': int(value) * 0.2,  # Placeholder: ~20% of sleep is deep
+                            'minute_light': int(value) * 0.5,  # Placeholder: ~50% of sleep is light
+                            'minute_rem': int(value) * 0.3,  # Placeholder: ~30% of sleep is REM
+                            'minute_wake': 20  # Same as minute_awake for consistency
+                        }
+                        
+                        sleep_records.append(sleep_record)
+                    except Exception as e:
+                        logger.warning(f"Error processing sleep record: {e}")
+                
+                if sleep_records:
+                    try:
+                        # Insert records in batches for efficiency
+                        for i in range(0, len(sleep_records), 10):
+                            batch = sleep_records[i:i+10]
+                            self.service_client.table('fitbit_sleep_daily_summary').upsert(batch).execute()
+                        
+                        logger.info(f"Inserted {len(sleep_records)} sleep records")
+                    except Exception as e:
+                        logger.error(f"Error inserting sleep records: {e}", exc_info=True)
+                        success = False
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error uploading health data: {str(e)}", exc_info=True)
             return False
     
     def get_latest_analysis(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Get the latest analysis result for a user"""
         try:
-            result = self.client.table('analysis_results') \
+            result = self.service_client.table('analysis_results') \
                 .select('*') \
                 .eq('person_id', user_id) \
                 .order('analysis_date', desc=True) \
                 .limit(1) \
                 .execute()
             
-            if result.data and len(result.data) > 0:
-                return result.data[0]
-            else:
+            if not result.data or len(result.data) == 0:
                 logger.info(f"No analysis result found for user {user_id}")
                 return None
+                
+            # Get the first (most recent) result
+            db_result = result.data[0]
+            logger.info(f"Found analysis result: {db_result}")
+            
+            # Parse the contributing factors JSON if it exists
+            contributing_factors = {}
+            if 'contributing_factors' in db_result and db_result['contributing_factors']:
+                try:
+                    contributing_factors = json.loads(db_result['contributing_factors'])
+                except Exception as e:
+                    logger.warning(f"Error parsing contributing_factors JSON: {e}")
+            
+            # Construct the result using the database fields directly
+            analysis_result = {
+                'userId': db_result.get('person_id', user_id),
+                'riskScore': db_result.get('risk_score', 0.0),  # Already stored as floating point
+                'riskLevel': db_result.get('risk_level', 'UNKNOWN'),
+                'analysisDate': db_result.get('analysis_date', datetime.now().isoformat()),
+                'contributingFactors': contributing_factors,
+                'prediction': db_result.get('prediction', 0)
+            }
+            
+            logger.info(f"Formatted analysis result for iOS app: {analysis_result}")
+            return analysis_result
                 
         except Exception as e:
             logger.error(f"Error getting latest analysis: {str(e)}", exc_info=True)
@@ -499,7 +822,7 @@ class SupabaseClient:
                 if table in ['fitbit_sleep_daily_summary']:
                     date_field = 'sleep_date'
                 
-                result = self.client.table(table) \
+                result = self.service_client.table(table) \
                     .select(date_field) \
                     .eq('person_id', user_id) \
                     .order(date_field, desc=True) \
@@ -543,7 +866,7 @@ class SupabaseClient:
             }
             
             # Get latest heart rate timestamp
-            heart_rate_result = self.client.table('fitbit_heart_rate_level') \
+            heart_rate_result = self.service_client.table('fitbit_heart_rate_level') \
                 .select('date') \
                 .eq('person_id', user_id) \
                 .order('date', desc=True) \
@@ -555,7 +878,7 @@ class SupabaseClient:
                 latest_timestamps['heartRate'] = datetime.fromisoformat(f"{date_str}T23:59:59")
             
             # Get latest steps timestamp
-            steps_result = self.client.table('fitbit_intraday_steps') \
+            steps_result = self.service_client.table('fitbit_intraday_steps') \
                 .select('date') \
                 .eq('person_id', user_id) \
                 .order('date', desc=True) \
@@ -567,7 +890,7 @@ class SupabaseClient:
                 latest_timestamps['steps'] = datetime.fromisoformat(f"{date_str}T23:59:59")
             
             # Get latest activity timestamp
-            activity_result = self.client.table('fitbit_activity') \
+            activity_result = self.service_client.table('fitbit_activity') \
                 .select('date') \
                 .eq('person_id', user_id) \
                 .order('date', desc=True) \
@@ -579,7 +902,7 @@ class SupabaseClient:
                 latest_timestamps['activeEnergy'] = datetime.fromisoformat(f"{date_str}T23:59:59")
             
             # Get latest sleep timestamp
-            sleep_result = self.client.table('fitbit_sleep_daily_summary') \
+            sleep_result = self.service_client.table('fitbit_sleep_daily_summary') \
                 .select('sleep_date') \
                 .eq('person_id', user_id) \
                 .order('sleep_date', desc=True) \
@@ -602,15 +925,26 @@ class SupabaseClient:
             # In case of error, return all None to force fresh data upload
             return {k: None for k in latest_timestamps.keys()}
     
-    def get_health_data_for_analysis(self, user_id: str, days: int = 60) -> Dict[str, Any]:
-        """Get health data from Supabase for analysis"""
+    def get_health_data_for_analysis(self, user_id: str, days: int = 60, batch_size: int = 1000) -> Dict[str, Any]:
+        """
+        Get health data for analysis from all health data tables for a user
+        
+        Args:
+            user_id: The user ID
+            days: Number of days of data to retrieve
+            batch_size: Number of records to fetch per batch (pagination size)
+            
+        Returns:
+            Dictionary with all health data in a format compatible with the mental health model
+        """
         try:
+            logger.info(f"Getting health data for analysis from user {user_id}")
+            
+            # Calculate the date range
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
-            start_date_str = start_date.strftime('%Y-%m-%d')
             
-            logger.info(f"Fetching {days} days of health data for user {user_id}")
-            
+            # Initialize data structure for results
             health_data = {
                 "heartRate": [],
                 "steps": [],
@@ -621,115 +955,239 @@ class SupabaseClient:
                 "basalEnergy": [],
                 "flightsClimbed": [],
                 "userInfo": {
-                    "personId": user_id,
-                    "age": 33,
-                    "genderBinary": 1
+                    "userId": user_id,
+                    "age": 33,  # Default value, will be updated if profile data is found
+                    "genderBinary": 1  # Default value (female), will be updated if profile data is found
                 }
             }
             
-            # Fetch heart rate data
-            heart_rate_result = self.client.table('fitbit_heart_rate_level') \
-                .select('*') \
-                .eq('person_id', user_id) \
-                .gte('date', start_date_str) \
-                .execute()
+            # Get profile data
+            try:
+                profile_result = self.service_client.table('person_dataset') \
+                    .select('*') \
+                    .eq('person_id', user_id) \
+                    .execute()
                 
-            if heart_rate_result.data:
-                for entry in heart_rate_result.data:
-                    date_str = entry['date']
-                    date_time = datetime.strptime(f"{date_str} 12:00:00", '%Y-%m-%d %H:%M:%S')
-                    iso_date = date_time.isoformat() + 'Z'
+                if profile_result.data and len(profile_result.data) > 0:
+                    profile = profile_result.data[0]
                     
-                    health_data["heartRate"].append({
-                        "type": "HKQuantityTypeIdentifierHeartRate",
-                        "startDate": iso_date,
-                        "endDate": iso_date,
-                        "value": entry['avg_rate'],
-                        "unit": "count/min"
+                    # Get gender and convert to binary (1 for female, 0 for others)
+                    gender = profile.get('gender', '')
+                    gender_binary = 1 if gender == 'FEMALE' else 0
+                    
+                    # Get age from birthdate
+                    birthdate_str = profile.get('age', '')  # Stored in the 'age' column
+                    if birthdate_str:
+                        try:
+                            birthdate = datetime.fromisoformat(birthdate_str.replace('Z', '+00:00'))
+                            age = end_date.year - birthdate.year
+                            # Adjust age if birthday hasn't occurred yet this year
+                            if (end_date.month, end_date.day) < (birthdate.month, birthdate.day):
+                                age -= 1
+                        except Exception as e:
+                            logger.warning(f"Error calculating age from birthdate: {e}")
+                            age = 33  # Default age
+                    else:
+                        age = 33  # Default age
+                    
+                    # Update userInfo with profile data
+                    health_data["userInfo"].update({
+                        "age": age,
+                        "genderBinary": gender_binary,
+                        "gender": gender
                     })
+                    
+                    logger.info(f"Retrieved profile for user {user_id}: age={age}, gender={gender}, genderBinary={gender_binary}")
+                else:
+                    logger.warning(f"No profile found for user {user_id}, using default values")
+            except Exception as e:
+                logger.warning(f"Error retrieving user profile: {e}")
             
-            # Fetch step data
-            steps_result = self.client.table('fitbit_intraday_steps') \
-                .select('*') \
-                .eq('person_id', user_id) \
-                .gte('date', start_date_str) \
-                .execute()
-                
-            if steps_result.data:
-                for entry in steps_result.data:
-                    date_str = entry['date']
-                    date_time = datetime.strptime(f"{date_str} 23:59:59", '%Y-%m-%d %H:%M:%S')
-                    iso_date = date_time.isoformat() + 'Z'
-                    
-                    health_data["steps"].append({
-                        "type": "HKQuantityTypeIdentifierStepCount",
-                        "startDate": iso_date,
-                        "endDate": iso_date,
-                        "value": entry['sum_steps'],
-                        "unit": "count"
-                    })
+            # Format dates for Supabase queries
+            start_date_str = start_date.strftime('%Y-%m-%d')
+            end_date_str = end_date.strftime('%Y-%m-%d')
             
-            # Fetch activity data
-            activity_result = self.client.table('fitbit_activity') \
-                .select('*') \
-                .eq('person_id', user_id) \
-                .gte('date', start_date_str) \
-                .execute()
+            # Fetch heart rate data with pagination
+            def fetch_heart_rate_data():
+                offset = 0
+                total_records = 0
+                has_more = True
                 
-            if activity_result.data:
-                for entry in activity_result.data:
-                    date_str = entry['date']
-                    date_time = datetime.strptime(f"{date_str} 23:59:59", '%Y-%m-%d %H:%M:%S')
-                    iso_date = date_time.isoformat() + 'Z'
-                    
-                    # Active energy
-                    health_data["activeEnergy"].append({
-                        "type": "HKQuantityTypeIdentifierActiveEnergyBurned",
-                        "startDate": iso_date,
-                        "endDate": iso_date,
-                        "value": entry['activity_calories'],
-                        "unit": "kcal"
-                    })
-                    
-                    # Workout data
-                    if entry['very_active_minutes'] > 0:
-                        duration_seconds = entry['very_active_minutes'] * 60
+                while has_more:
+                    heart_rate_result = self.service_client.table('fitbit_heart_rate_level') \
+                        .select('*') \
+                        .eq('person_id', user_id) \
+                        .gte('date', start_date_str) \
+                        .range(offset, offset + batch_size - 1) \
+                        .execute()
                         
-                        health_data["workout"].append({
-                            "type": "HKWorkoutTypeIdentifier",
-                            "startDate": iso_date,
-                            "endDate": iso_date,
-                            "duration": duration_seconds,
-                            "workoutActivityType": 37,
-                            "totalEnergyBurned": entry['activity_calories'],
-                            "value": duration_seconds
-                        })
-            
-            # Fetch sleep data
-            sleep_result = self.client.table('fitbit_sleep_daily_summary') \
-                .select('*') \
-                .eq('person_id', user_id) \
-                .gte('sleep_date', start_date_str) \
-                .execute()
+                    if heart_rate_result.data:
+                        for entry in heart_rate_result.data:
+                            date_str = entry['date']
+                            date_time = datetime.strptime(f"{date_str} 12:00:00", '%Y-%m-%d %H:%M:%S')
+                            iso_date = date_time.isoformat() + 'Z'
+                            
+                            health_data["heartRate"].append({
+                                "type": "HKQuantityTypeIdentifierHeartRate",
+                                "startDate": iso_date,
+                                "endDate": iso_date,
+                                "value": entry['avg_rate'],
+                                "unit": "count/min"
+                            })
+                        
+                        records_fetched = len(heart_rate_result.data)
+                        total_records += records_fetched
+                        offset += batch_size
+                        
+                        # Check if we have more records to fetch
+                        has_more = records_fetched == batch_size
+                    else:
+                        has_more = False
                 
-            if sleep_result.data:
-                for entry in sleep_result.data:
-                    date_str = entry['sleep_date']
-                    date_time = datetime.strptime(f"{date_str} 22:00:00", '%Y-%m-%d %H:%M:%S')
-                    iso_date = date_time.isoformat() + 'Z'
-                    
-                    end_time = date_time + timedelta(minutes=entry['minute_asleep'])
-                    iso_end_date = end_time.isoformat() + 'Z'
-                    
-                    health_data["sleep"].append({
-                        "type": "HKCategoryTypeIdentifierSleepAnalysis",
-                        "startDate": iso_date,
-                        "endDate": iso_end_date,
-                        "value": entry['minute_asleep'],
-                        "unit": "min"
-                    })
+                return total_records
             
-            logger.info(f"Retrieved health data for user {user_id}")
+            # Fetch step data with pagination
+            def fetch_step_data():
+                offset = 0
+                total_records = 0
+                has_more = True
+                
+                while has_more:
+                    steps_result = self.service_client.table('fitbit_intraday_steps') \
+                        .select('*') \
+                        .eq('person_id', user_id) \
+                        .gte('date', start_date_str) \
+                        .range(offset, offset + batch_size - 1) \
+                        .execute()
+                        
+                    if steps_result.data:
+                        for entry in steps_result.data:
+                            date_str = entry['date']
+                            date_time = datetime.strptime(f"{date_str} 23:59:59", '%Y-%m-%d %H:%M:%S')
+                            iso_date = date_time.isoformat() + 'Z'
+                            
+                            health_data["steps"].append({
+                                "type": "HKQuantityTypeIdentifierStepCount",
+                                "startDate": iso_date,
+                                "endDate": iso_date,
+                                "value": entry['sum_steps'],
+                                "unit": "count"
+                            })
+                        
+                        records_fetched = len(steps_result.data)
+                        total_records += records_fetched
+                        offset += batch_size
+                        
+                        # Check if we have more records to fetch
+                        has_more = records_fetched == batch_size
+                    else:
+                        has_more = False
+                
+                return total_records
+            
+            # Fetch activity data with pagination
+            def fetch_activity_data():
+                offset = 0
+                total_records = 0
+                has_more = True
+                
+                while has_more:
+                    activity_result = self.service_client.table('fitbit_activity') \
+                        .select('*') \
+                        .eq('person_id', user_id) \
+                        .gte('date', start_date_str) \
+                        .range(offset, offset + batch_size - 1) \
+                        .execute()
+                        
+                    if activity_result.data:
+                        for entry in activity_result.data:
+                            date_str = entry['date']
+                            date_time = datetime.strptime(f"{date_str} 23:59:59", '%Y-%m-%d %H:%M:%S')
+                            iso_date = date_time.isoformat() + 'Z'
+                            
+                            # Active energy
+                            health_data["activeEnergy"].append({
+                                "type": "HKQuantityTypeIdentifierActiveEnergyBurned",
+                                "startDate": iso_date,
+                                "endDate": iso_date,
+                                "value": entry['activity_calories'],
+                                "unit": "kcal"
+                            })
+                            
+                            # Workout data
+                            if entry['very_active_minutes'] > 0:
+                                duration_seconds = entry['very_active_minutes'] * 60
+                                
+                                health_data["workout"].append({
+                                    "type": "HKWorkoutTypeIdentifier",
+                                    "startDate": iso_date,
+                                    "endDate": iso_date,
+                                    "duration": duration_seconds,
+                                    "workoutActivityType": 37,
+                                    "totalEnergyBurned": entry['activity_calories'],
+                                    "value": duration_seconds
+                                })
+                        
+                        records_fetched = len(activity_result.data)
+                        total_records += records_fetched
+                        offset += batch_size
+                        
+                        # Check if we have more records to fetch
+                        has_more = records_fetched == batch_size
+                    else:
+                        has_more = False
+                
+                return total_records
+            
+            # Fetch sleep data with pagination
+            def fetch_sleep_data():
+                offset = 0
+                total_records = 0
+                has_more = True
+                
+                while has_more:
+                    sleep_result = self.service_client.table('fitbit_sleep_daily_summary') \
+                        .select('*') \
+                        .eq('person_id', user_id) \
+                        .gte('sleep_date', start_date_str) \
+                        .range(offset, offset + batch_size - 1) \
+                        .execute()
+                        
+                    if sleep_result.data:
+                        for entry in sleep_result.data:
+                            date_str = entry['sleep_date']
+                            date_time = datetime.strptime(f"{date_str} 22:00:00", '%Y-%m-%d %H:%M:%S')
+                            iso_date = date_time.isoformat() + 'Z'
+                            
+                            end_time = date_time + timedelta(minutes=entry['minute_asleep'])
+                            iso_end_date = end_time.isoformat() + 'Z'
+                            
+                            health_data["sleep"].append({
+                                "type": "HKCategoryTypeIdentifierSleepAnalysis",
+                                "startDate": iso_date,
+                                "endDate": iso_end_date,
+                                "value": entry['minute_asleep'],
+                                "unit": "min"
+                            })
+                        
+                        records_fetched = len(sleep_result.data)
+                        total_records += records_fetched
+                        offset += batch_size
+                        
+                        # Check if we have more records to fetch
+                        has_more = records_fetched == batch_size
+                    else:
+                        has_more = False
+                
+                return total_records
+            
+            # Execute the fetch operations and log the results
+            hr_count = fetch_heart_rate_data()
+            steps_count = fetch_step_data()
+            activity_count = fetch_activity_data()
+            sleep_count = fetch_sleep_data()
+            
+            logger.info(f"Retrieved health data for user {user_id}: heart rate: {hr_count}, steps: {steps_count}, activity: {activity_count}, sleep: {sleep_count}")
             
             return health_data
             
@@ -745,7 +1203,7 @@ class SupabaseClient:
                 "basalEnergy": [],
                 "flightsClimbed": [],
                 "userInfo": {
-                    "personId": user_id,
+                    "userId": user_id,
                     "age": 33,
                     "genderBinary": 1
                 }
@@ -784,7 +1242,7 @@ class SupabaseClient:
             GROUP BY date
             """
             heart_rate_params = {"person_id": user_id, "start_date": start_date_str}
-            heart_rate_result = self.client.rpc(
+            heart_rate_result = self.service_client.rpc(
                 'execute_sql',
                 {"query": heart_rate_query, "params": heart_rate_params}
             ).execute()
@@ -814,7 +1272,7 @@ class SupabaseClient:
             GROUP BY date
             """
             steps_params = {"person_id": user_id, "start_date": start_date_str}
-            steps_result = self.client.rpc(
+            steps_result = self.service_client.rpc(
                 'execute_sql',
                 {"query": steps_query, "params": steps_params}
             ).execute()
@@ -837,7 +1295,7 @@ class SupabaseClient:
                     data_coverage["steps"]["latest_date"] = dates[-1] if dates else None
             
             # Check activity/energy data - no GROUP BY needed so we use the regular method
-            activity_result = self.client.table('fitbit_activity') \
+            activity_result = self.service_client.table('fitbit_activity') \
                 .select('date, activity_calories') \
                 .eq('person_id', user_id) \
                 .gte('date', start_date_str) \
@@ -853,7 +1311,7 @@ class SupabaseClient:
                 data_coverage["activeEnergy"]["latest_date"] = dates[-1] if dates else None
                 
                 # Check for workout data (very active minutes)
-                workout_result = self.client.table('fitbit_activity') \
+                workout_result = self.service_client.table('fitbit_activity') \
                     .select('date, very_active_minutes') \
                     .eq('person_id', user_id) \
                     .gte('date', start_date_str) \
@@ -876,7 +1334,7 @@ class SupabaseClient:
             GROUP BY sleep_date
             """
             sleep_params = {"person_id": user_id, "start_date": start_date_str}
-            sleep_result = self.client.rpc(
+            sleep_result = self.service_client.rpc(
                 'execute_sql',
                 {"query": sleep_query, "params": sleep_params}
             ).execute()
@@ -1063,19 +1521,19 @@ class SupabaseClient:
                 # Add specific condition for workout and activeEnergy
                 condition = None
                 if data_type == 'workout':
-                    condition = self.client.table(table) \
+                    condition = self.service_client.table(table) \
                         .select(date_field) \
                         .eq('person_id', user_id) \
                         .gt('very_active_minutes', 0) \
                         .gte(date_field, (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d'))
                 elif data_type == 'activeEnergy':
-                    condition = self.client.table(table) \
+                    condition = self.service_client.table(table) \
                         .select(date_field) \
                         .eq('person_id', user_id) \
                         .gt('activity_calories', 0) \
                         .gte(date_field, (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d'))
                 else:
-                    condition = self.client.table(table) \
+                    condition = self.service_client.table(table) \
                         .select(date_field) \
                         .eq('person_id', user_id) \
                         .gte(date_field, (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d'))
@@ -1135,4 +1593,60 @@ class SupabaseClient:
                 "days": days
             },
             "min_coverage_percentage": min_coverage_percentage
-        } 
+        }
+    
+    def update_user_profile(self, user_id: str, gender: str, birthdate: str, age: int) -> bool:
+        """
+        Update or create user profile data in person_dataset table
+        
+        Args:
+            user_id: The user ID
+            gender: User's gender (MALE, FEMALE, OTHER, or PREFER_NOT_TO_ANSWER)
+            birthdate: Birthdate in YYYY-MM-DD format
+            age: Calculated age
+            
+        Returns:
+            Boolean indicating success
+        """
+        try:
+            logger.info(f"Updating profile for user {user_id}")
+            
+            # Check if user already has a profile
+            result = self.service_client.table('person_dataset') \
+                .select('*') \
+                .eq('person_id', user_id) \
+                .execute()
+            
+            current_time = datetime.now().isoformat()
+            
+            if result.data and len(result.data) > 0:
+                # Update existing profile
+                profile_id = result.data[0]['id']
+                
+                self.service_client.table('person_dataset') \
+                    .update({
+                        'gender': gender,
+                        'age': birthdate,  # Store birthdate in the age column
+                        'updated_at': current_time
+                    }) \
+                    .eq('id', profile_id) \
+                    .execute()
+                    
+                logger.info(f"Updated profile for user {user_id}")
+            else:
+                # Create new profile
+                self.service_client.table('person_dataset').insert({
+                    'person_id': user_id,
+                    'gender': gender,
+                    'age': birthdate,  # Store birthdate in the age column
+                    'created_at': current_time,
+                    'updated_at': current_time
+                }).execute()
+                
+                logger.info(f"Created new profile for user {user_id}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating user profile: {str(e)}", exc_info=True)
+            return False 
