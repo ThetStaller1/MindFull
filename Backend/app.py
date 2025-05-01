@@ -44,7 +44,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 MODEL_DIR = Path("model")
 MODEL_PATH = MODEL_DIR / "mental_health_model.xgb"
 FEATURE_IMPORTANCE_PATH = MODEL_DIR / "feature_importance.csv"
-FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.json"
+# Using feature_importance.csv for feature names as well since it has the complete list
+FEATURE_NAMES_PATH = MODEL_DIR / "feature_importance.csv"
 
 # Authentication models
 class UserRegister(BaseModel):
@@ -122,26 +123,18 @@ class MentalHealthPredictor:
             if os.path.exists(feature_importance_path):
                 self.feature_importance = pd.read_csv(feature_importance_path)
                 logger.info(f"Feature importance loaded with {len(self.feature_importance)} features")
+                
+                # Use the feature column from feature_importance.csv as our feature names
+                # This ensures we have all features required by the model
+                self.feature_names = self.feature_importance['feature'].tolist()
+                logger.info(f"Feature names loaded from feature_importance.csv: {len(self.feature_names)} features")
             else:
                 logger.warning("Feature importance file not found, will not include importance data")
                 self.feature_importance = None
+                self.feature_names = None
         except Exception as e:
             logger.error(f"Error loading feature importance: {e}")
             self.feature_importance = None
-        
-        # Load feature names - EXACTLY as in test_mental_health_model.py
-        feature_names_path = os.path.join(os.path.dirname(__file__), "model", "feature_names.json")
-        logger.info(f"Loading feature names from: {feature_names_path}")
-        try:
-            if os.path.exists(feature_names_path):
-                with open(feature_names_path, 'r') as f:
-                    self.feature_names = json.load(f)
-                logger.info(f"Feature names loaded: {len(self.feature_names)} features")
-            else:
-                logger.warning("Feature names file not found, will use all available features")
-                self.feature_names = None
-        except Exception as e:
-            logger.error(f"Error loading feature names: {e}")
             self.feature_names = None
             
         logger.info("Mental Health Predictor initialized successfully")
@@ -317,6 +310,7 @@ class MentalHealthPredictor:
                     X[col] = 0
             
             # Keep only the features expected by the model, in the correct order
+            # Now using the column names from feature_importance.csv which has all required features
             X = X[self.feature_names]
             logger.info(f"Using {len(self.feature_names)} feature columns for prediction")
         
@@ -419,7 +413,7 @@ async def validate_auth(request: Request, auth_token: Optional[str] = Header(Non
     }
 
 # Authentication routes
-@app.post("/register", response_model=TokenData)
+@app.post("/auth/register", response_model=TokenData)
 async def register(user_data: UserRegister, supabase: SupabaseClient = Depends(get_supabase)):
     """Register a new user"""
     try:
@@ -442,7 +436,7 @@ async def register(user_data: UserRegister, supabase: SupabaseClient = Depends(g
         logger.error(f"Error during registration: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
-@app.post("/login", response_model=TokenData)
+@app.post("/auth/login", response_model=TokenData)
 async def login(user_data: UserLogin, supabase: SupabaseClient = Depends(get_supabase)):
     """Log in an existing user"""
     try:
@@ -465,8 +459,8 @@ async def login(user_data: UserLogin, supabase: SupabaseClient = Depends(get_sup
         logger.error(f"Error during login: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
-@app.post("/validate-token")
-async def validate_token(auth_info: dict = Depends(validate_auth)):
+@app.post("/auth/validate-token")
+async def auth_validate_token(auth_info: dict = Depends(validate_auth)):
     """Validate a token and return user information"""
     return {
         "valid": True,
@@ -474,15 +468,38 @@ async def validate_token(auth_info: dict = Depends(validate_auth)):
         "email": auth_info["email"]
     }
 
-@app.post("/logout")
-async def logout(auth_info: dict = Depends(validate_auth), supabase: SupabaseClient = Depends(get_supabase)):
+@app.post("/auth/logout")
+async def auth_logout(auth_info: dict = Depends(validate_auth), supabase: SupabaseClient = Depends(get_supabase)):
     """Log out a user"""
     try:
-        result = supabase.logout_user(auth_info["user_id"])
+        # Check if logout_user method exists, otherwise just return success
+        if hasattr(supabase, 'logout_user'):
+            result = supabase.logout_user(auth_info["user_id"])
         return {"message": "Successfully logged out"}
     except Exception as e:
         logger.error(f"Error during logout: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
+
+# Keep the original routes as well for backward compatibility
+@app.post("/register", response_model=TokenData)
+async def register_compat(user_data: UserRegister, supabase: SupabaseClient = Depends(get_supabase)):
+    """Register a new user (compatibility endpoint)"""
+    return await register(user_data, supabase)
+
+@app.post("/login", response_model=TokenData)
+async def login_compat(user_data: UserLogin, supabase: SupabaseClient = Depends(get_supabase)):
+    """Log in an existing user (compatibility endpoint)"""
+    return await login(user_data, supabase)
+
+@app.post("/validate-token")
+async def validate_token_compat(auth_info: dict = Depends(validate_auth)):
+    """Validate a token and return user information (compatibility endpoint)"""
+    return await auth_validate_token(auth_info)
+
+@app.post("/logout")
+async def logout_compat(auth_info: dict = Depends(validate_auth), supabase: SupabaseClient = Depends(get_supabase)):
+    """Log out a user (compatibility endpoint)"""
+    return await auth_logout(auth_info, supabase)
 
 # Routes
 @app.get("/")
@@ -496,56 +513,48 @@ async def analyze_health_data(
     supabase: SupabaseClient = Depends(get_supabase),
     auth_info: dict = Depends(validate_auth)
 ):
+    """
+    Analyze health data from HealthKit and provide mental health assessment.
+    The raw health data is not stored in Supabase, only processed directly.
+    """
     try:
-        logger.info(f"Received health data analysis request")
-        
-        # Set the user ID from auth in the health data
+        # Extract user_id from auth info
         user_id = auth_info["user_id"]
-        health_data.userInfo["personId"] = user_id
+        user_email = auth_info["email"]
+        logger.info(f"Processing health data analysis for user {user_id}")
         
-        # Step 1: Store health data in Supabase
-        logger.info(f"Storing health data for user {user_id}")
-        if not supabase.store_health_data(user_id, health_data.dict()):
-            logger.warning(f"Some health data may not have been stored properly for user {user_id}")
+        # Add user info to health data if not already present
+        if not health_data.userInfo:
+            health_data.userInfo = {"personId": user_id}
+        else:
+            health_data.userInfo["personId"] = user_id
         
-        # Step 2: Fetch the most recent 60 days of data from Supabase
-        logger.info(f"Fetching 60 days of health data from Supabase for user {user_id}")
-        supabase_health_data = supabase.get_health_data_for_analysis(user_id, days=60)
+        # Process the health data directly without storing it in Supabase
+        # Run the prediction model
+        result = predictor.predict(health_data)
         
-        # Convert Supabase data to HealthKitData model
-        supabase_health_model = HealthKitData(
-            heartRate=supabase_health_data["heartRate"],
-            steps=supabase_health_data["steps"],
-            activeEnergy=supabase_health_data["activeEnergy"],
-            sleep=supabase_health_data["sleep"],
-            workout=supabase_health_data["workout"],
-            distance=supabase_health_data["distance"],
-            basalEnergy=supabase_health_data["basalEnergy"],
-            flightsClimbed=supabase_health_data["flightsClimbed"],
-            userInfo=supabase_health_data["userInfo"]
-        )
+        # Add user ID to result
+        result.userId = user_id
         
-        # Log the data counts for analysis
-        logger.info(f"Using Supabase data for analysis:")
-        logger.info(f"  - Heart Rate: {len(supabase_health_model.heartRate)} records")
-        logger.info(f"  - Steps: {len(supabase_health_model.steps)} records")
-        logger.info(f"  - Active Energy: {len(supabase_health_model.activeEnergy)} records")
-        logger.info(f"  - Sleep: {len(supabase_health_model.sleep)} records")
-        logger.info(f"  - Workout: {len(supabase_health_model.workout)} records")
+        # Store only the analysis result in Supabase
+        success = supabase.store_analysis_result({
+            "user_id": user_id,
+            "prediction": result.prediction,
+            "risk_level": result.riskLevel,
+            "risk_score": result.riskScore,
+            "contributing_factors": result.contributingFactors,
+            "analysis_date": result.analysisDate
+        })
         
-        # Step 3: Run the prediction using data from Supabase
-        logger.info(f"Running prediction using Supabase data for user {user_id}")
-        result = predictor.predict(supabase_health_model)
+        if not success:
+            logger.error(f"Failed to store analysis result for user {user_id}")
+            # Continue anyway - we'll return the result even if storage failed
         
-        # Step 4: Store analysis result in Supabase
-        logger.info(f"Storing analysis result for user {user_id}")
-        supabase.store_analysis_result(result.dict())
-        
-        logger.info(f"Analysis complete. Risk level: {result.riskLevel}, Score: {result.riskScore:.2f}")
         return result
+        
     except Exception as e:
-        logger.error(f"Error during analysis: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        logger.error(f"Error analyzing health data: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error analyzing health data: {str(e)}")
 
 @app.post("/check-analysis")
 async def check_analysis(

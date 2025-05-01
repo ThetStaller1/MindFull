@@ -252,36 +252,34 @@ class SupabaseClient:
             return False
     
     def store_analysis_result(self, result: Dict[str, Any]) -> bool:
-        """Store analysis result in Supabase"""
+        """Store mental health analysis result in Supabase"""
         try:
-            user_id = result.get('userId')
-            prediction = result.get('prediction')
-            risk_level = result.get('riskLevel')
-            risk_score = result.get('riskScore')
-            contributing_factors = result.get('contributingFactors', {})
-            analysis_date = result.get('analysisDate')
+            # Store result in the mental_health_analysis table
+            logger.info(f"Storing analysis result for user {result.get('user_id')}")
             
-            # Validate required fields
-            if not all([user_id, prediction is not None, risk_level, risk_score is not None, analysis_date]):
-                logger.error("Missing required fields in analysis result")
+            # Create the data payload
+            analysis_data = {
+                'user_id': result.get('user_id'),
+                'prediction': result.get('prediction', 0),
+                'risk_level': result.get('risk_level', 'Unknown'),
+                'risk_score': result.get('risk_score', 0.0),
+                'contributing_factors': result.get('contributing_factors', {}),
+                'analysis_date': result.get('analysis_date', datetime.now().isoformat()),
+                'created_at': datetime.now().isoformat()
+            }
+            
+            # Insert the analysis result
+            response = self.client.table('mental_health_analysis').insert(analysis_data).execute()
+            
+            if hasattr(response, 'data') and response.data:
+                logger.info(f"Successfully stored analysis result for user {result.get('user_id')}")
+                return True
+            else:
+                logger.error(f"Failed to store analysis result: {getattr(response, 'error', 'Unknown error')}")
                 return False
-            
-            # Store result in analysis_results table
-            self.client.table('analysis_results').insert({
-                'person_id': user_id,
-                'prediction': prediction,
-                'risk_level': risk_level,
-                'risk_score': risk_score,
-                'contributing_factors': contributing_factors,
-                'analysis_date': analysis_date,
-                'last_update_date': datetime.now().isoformat()
-            }).execute()
-            
-            logger.info(f"Successfully stored analysis result for user {user_id}")
-            return True
-            
+                
         except Exception as e:
-            logger.error(f"Error storing analysis result: {str(e)}", exc_info=True)
+            logger.error(f"Error storing analysis result: {str(e)}")
             return False
     
     def get_latest_analysis(self, user_id: str) -> Optional[Dict[str, Any]]:

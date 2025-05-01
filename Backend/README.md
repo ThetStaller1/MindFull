@@ -1,6 +1,15 @@
-# MindFull API - FastAPI Backend
+# MindFull API - FastAPI Backend (Presentation Branch)
 
 This backend serves the MindWatch iOS app by processing HealthKit data and predicting mental health risk using a pre-trained XGBoost model.
+
+## Presentation Branch Data Flow
+
+This branch has been modified for presentation purposes:
+
+1. iOS app still uses Supabase for authentication
+2. Health data is sent directly to the backend for processing without being stored in Supabase
+3. Only analysis results are stored in Supabase
+4. This simplified flow is for demonstration only and differs from the production implementation
 
 ## Setup
 
