@@ -5,6 +5,8 @@ from typing import Dict, List, Any, Optional
 from supabase import create_client, Client
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import time
+import dateutil.parser
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -215,6 +217,78 @@ class SupabaseClient:
                             self.service_client.table('fitbit_heart_rate_level').upsert(batch).execute()
                         
                         logger.info(f"Inserted {len(heart_rate_records)} heart rate records")
+                        
+                        # Process heart rate summary by day and zone
+                        # Group by date to calculate heart rate zones
+                        heart_rate_by_date = {}
+                        
+                        # Process records to group by date
+                        for record in health_data['heartRate']:
+                            try:
+                                start_date = record.get('startDate', '')
+                                if 'T' in start_date:
+                                    date_str = start_date.split('T')[0]
+                                else:
+                                    date_str = datetime.now().strftime('%Y-%m-%d')
+                                
+                                # Get the value as a number
+                                value = record.get('value')
+                                if isinstance(value, str):
+                                    try:
+                                        value = float(value)
+                                    except:
+                                        value = 0
+                                
+                                # Group by date
+                                if date_str not in heart_rate_by_date:
+                                    heart_rate_by_date[date_str] = []
+                                
+                                heart_rate_by_date[date_str].append(value)
+                            except Exception as e:
+                                logger.warning(f"Error grouping heart rate: {e}")
+                        
+                        # Calculate heart rate zones and create summary records
+                        summary_records = []
+                        
+                        # Define heart rate zones
+                        heart_rate_zones = {
+                            "Out of Range": {"min": 30, "max": 99},
+                            "Fat Burn": {"min": 99, "max": 139},
+                            "Cardio": {"min": 139, "max": 169},
+                            "Peak": {"min": 169, "max": 220}
+                        }
+                        
+                        for date_str, values in heart_rate_by_date.items():
+                            if not values:
+                                continue
+                                
+                            # Calculate zone statistics
+                            for zone_name, zone_range in heart_rate_zones.items():
+                                # Filter values in this zone
+                                zone_values = [v for v in values if zone_range["min"] <= v <= zone_range["max"]]
+                                
+                                if zone_values:
+                                    # Create summary record
+                                    zone_summary = {
+                                        'person_id': user_id,
+                                        'date': date_str,
+                                        'zone_name': zone_name,
+                                        'min_heart_rate': int(min(zone_values)),
+                                        'max_heart_rate': int(max(zone_values)),
+                                        'minute_in_zone': len(zone_values),
+                                        'calorie_count': int(sum(zone_values) * 0.1)  # Simple estimate
+                                    }
+                                    
+                                    summary_records.append(zone_summary)
+                        
+                        if summary_records:
+                            # Insert heart rate summary records in batches
+                            for i in range(0, len(summary_records), 10):
+                                batch = summary_records[i:i+10]
+                                self.service_client.table('fitbit_heart_rate_summary').upsert(batch).execute()
+                            
+                            logger.info(f"Inserted {len(summary_records)} heart rate summary records")
+                        
                     except Exception as e:
                         logger.error(f"Error inserting heart rate records: {e}", exc_info=True)
                         success = False
@@ -321,54 +395,164 @@ class SupabaseClient:
             # Process sleep data
             if 'sleep' in health_data and health_data['sleep']:
                 sleep_records = []
+                sleep_level_records = []
+                
+                # Group sleep data by day
+                sleep_by_day = {}
                 
                 for record in health_data['sleep']:
-                    try:
-                        # Extract date from ISO format
-                        start_date = record.get('startDate', '')
-                        if 'T' in start_date:
-                            date_str = start_date.split('T')[0]
+                    # Extract date and add to group
+                    start_date = record.get('startDate', '')
+                    if 'T' in start_date:
+                        date_str = start_date.split('T')[0]
+                    else:
+                        date_str = datetime.now().strftime('%Y-%m-%d')
+                    
+                    # Add record to date group
+                    if date_str in sleep_by_day:
+                        sleep_by_day[date_str].append(record)
+                    else:
+                        sleep_by_day[date_str] = [record]
+                
+                # Process each day's sleep data
+                for date_str, day_records in sleep_by_day.items():
+                    # Calculate summary values for the day
+                    minute_in_bed = 0
+                    minute_asleep = 0
+                    minute_awake = 0
+                    minute_restless = 0
+                    minute_deep = 0
+                    minute_light = 0
+                    minute_rem = 0
+                    minute_wake = 0
+                    
+                    for idx, record in enumerate(day_records):
+                        # Extract sleep stage
+                        sleep_stage = record.get('value', 'unknown')
+                        
+                        # Generate a unique sleep ID for each sleep session
+                        if idx == 0 or record.get('startDate', '').split('T')[0] != day_records[idx-1].get('startDate', '').split('T')[0]:
+                            # This is a new sleep session on this day
+                            timestamp = record.get('timestamp', time.time())
+                            sleep_id = f"sleep_{timestamp}"
                         else:
-                            date_str = datetime.now().strftime('%Y-%m-%d')
+                            # Continue with the same sleep session
+                            timestamp = day_records[idx-1].get('timestamp', time.time())
+                            sleep_id = f"sleep_{timestamp}"
                         
-                        # Get the value as a number
-                        value = record.get('value')
-                        if isinstance(value, str):
+                        # Extract start/end times
+                        start_time_str = record.get('startDate', '')
+                        end_time_str = record.get('endDate', start_time_str)
+                        
+                        # Calculate or extract duration in minutes
+                        duration = 0
+                        if 'duration' in record:
+                            # Use explicit duration field
                             try:
-                                value = float(value)
-                            except:
-                                value = 0
+                                duration = float(record['duration'])
+                                logger.info(f"Using explicit duration field for sleep record: {duration} minutes")
+                            except (ValueError, TypeError):
+                                logger.warning(f"Invalid duration value: {record.get('duration')}")
                         
-                        # Create sleep record - ensure all duration fields are integers
-                        sleep_record = {
+                        if duration == 0 and start_time_str and end_time_str and start_time_str != end_time_str:
+                            # Calculate from time difference
+                            try:
+                                start_time = dateutil.parser.parse(start_time_str)
+                                end_time = dateutil.parser.parse(end_time_str)
+                                duration = (end_time - start_time).total_seconds() / 60
+                                logger.info(f"Calculated duration from timestamps: {duration} minutes")
+                            except Exception as e:
+                                logger.warning(f"Error calculating sleep duration: {e}")
+                        
+                        # Create sleep level record
+                        sleep_level = {
                             'person_id': user_id,
+                            'sleep_id': sleep_id,
                             'sleep_date': date_str,
-                            'is_main_sleep': True,  # Default to main sleep
-                            'minute_in_bed': int(float(value) + 30),  # Asleep + awake, ensure integer
-                            'minute_asleep': int(float(value)),  # Ensure integer
-                            'minute_after_wakeup': 10,  # Default placeholder
-                            'minute_awake': 20,  # Placeholder estimate
-                            'minute_restless': 10,  # Placeholder estimate
-                            'minute_deep': int(float(value) * 0.2),  # Ensure integer
-                            'minute_light': int(float(value) * 0.5),  # Ensure integer
-                            'minute_rem': int(float(value) * 0.3),  # Ensure integer
-                            'minute_wake': 20  # Same as minute_awake for consistency
+                            'is_main_sleep': True,
+                            'level': self._map_sleep_stage(sleep_stage),
+                            'start_time': start_time_str,
+                            'end_time': end_time_str,
+                            'duration': int(duration)
                         }
                         
-                        sleep_records.append(sleep_record)
-                    except Exception as e:
-                        logger.warning(f"Error processing sleep record: {e}")
+                        sleep_level_records.append(sleep_level)
+                        
+                        # Update summary values based on sleep stage
+                        level = self._map_sleep_stage(sleep_stage)
+                        
+                        minute_in_bed += duration
+                        
+                        if level in ['light', 'deep', 'rem']:
+                            minute_asleep += duration
+                            
+                        if level == 'wake':
+                            minute_wake += duration
+                            minute_awake += duration
+                        elif level == 'restless':
+                            minute_restless += duration
+                        elif level == 'deep':
+                            minute_deep += duration
+                        elif level == 'light':
+                            minute_light += duration
+                        elif level == 'rem':
+                            minute_rem += duration
+                    
+                    # Create sleep summary for the day
+                    summary = {
+                        'person_id': user_id,
+                        'sleep_date': date_str,
+                        'is_main_sleep': True,
+                        'minute_in_bed': int(minute_in_bed),
+                        'minute_asleep': int(minute_asleep),
+                        'minute_after_wakeup': 0, # No direct mapping from HealthKit
+                        'minute_awake': int(minute_awake),
+                        'minute_restless': int(minute_restless),
+                        'minute_deep': int(minute_deep),
+                        'minute_light': int(minute_light),
+                        'minute_rem': int(minute_rem),
+                        'minute_wake': int(minute_wake)
+                    }
+                    
+                    sleep_records.append(summary)
                 
                 if sleep_records:
                     try:
-                        # Insert records in batches for efficiency
+                        # Insert sleep daily summary records
                         for i in range(0, len(sleep_records), 10):
                             batch = sleep_records[i:i+10]
                             self.service_client.table('fitbit_sleep_daily_summary').upsert(batch).execute()
-                    
-                        logger.info(f"Inserted {len(sleep_records)} sleep records")
+                        
+                        logger.info(f"Inserted {len(sleep_records)} sleep daily summary records")
                     except Exception as e:
                         logger.error(f"Error inserting sleep records: {e}", exc_info=True)
+                        success = False
+                
+                if sleep_level_records:
+                    try:
+                        # Insert sleep level records
+                        for i in range(0, len(sleep_level_records), 10):
+                            batch = sleep_level_records[i:i+10]
+                            
+                            # Include seconds_from_start_of_day if it exists (for better sorting)
+                            for record in batch:
+                                if 'seconds_from_start_of_day' not in record:
+                                    # Calculate from date field if missing
+                                    try:
+                                        time_str = record.get('date', '')
+                                        if time_str:
+                                            dt = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+                                            midnight = datetime.combine(dt.date(), datetime.min.time())
+                                            seconds = int((dt - midnight).total_seconds())
+                                            record['seconds_from_start_of_day'] = seconds
+                                    except Exception as e:
+                                        logger.warning(f"Error calculating seconds_from_start_of_day: {e}")
+                            
+                            self.service_client.table('fitbit_sleep_level').upsert(batch).execute()
+                        
+                        logger.info(f"Inserted {len(sleep_level_records)} sleep level records")
+                    except Exception as e:
+                        logger.error(f"Error inserting sleep level records: {e}", exc_info=True)
                         success = False
             
             # Update activity records with workout data if available
@@ -481,285 +665,40 @@ class SupabaseClient:
             logger.error(f"Error saving analysis result: {str(e)}", exc_info=True)
             return False
 
-    def upload_health_data(self, user_id: str, health_data: Dict[str, Any]) -> bool:
-        """
-        Upload health data from Apple Health to Supabase.
+    # TODO: The upload_health_data method was previously here but was
+    # duplicative of store_health_data and was not being used in the codebase.
+    # If you need this functionality, use store_health_data instead.
+    # The removed method had the same functionality but with parameters in a different order
+    # (user_id first, then health_data).
+    
+    def _map_sleep_stage(self, stage: str) -> str:
+        """Map HealthKit sleep stage values to Fitbit format"""
+        sleep_stage_mapping = {
+            # Apple Watch sleep stages (numeric values)
+            '0': 'restless',        # In Bed
+            '1': 'light',           # Asleep (unspecified)
+            '2': 'wake',            # Awake
+            '3': 'deep',            # Deep
+            '4': 'rem',             # REM
+            '5': 'light',           # Core (equivalent to Fitbit's light)
+            
+            # Apple Watch sleep stages (string values)
+            'HKCategoryValueSleepAnalysisInBed': 'restless',
+            'HKCategoryValueSleepAnalysisAsleepUnspecified': 'light',
+            'HKCategoryValueSleepAnalysisAsleepCore': 'light',
+            'HKCategoryValueSleepAnalysisAsleepDeep': 'deep',
+            'HKCategoryValueSleepAnalysisAsleepREM': 'rem',
+            'HKCategoryValueSleepAnalysisAwake': 'wake',
+            
+            # Already mapped values (pass-through)
+            'light': 'light',
+            'deep': 'deep',
+            'rem': 'rem',
+            'wake': 'wake',
+            'restless': 'restless'
+        }
         
-        Args:
-            user_id: The user ID to upload data for
-            health_data: Dictionary containing Apple Health data
-            
-        Returns:
-            True if upload was successful, False otherwise
-        """
-        try:
-            success = True
-            
-            # Upload person dataset if provided
-            if 'userInfo' in health_data and health_data['userInfo']:
-                user_info = health_data['userInfo']
-                
-                # Default values
-                gender = user_info.get('gender', 'UNKNOWN')
-                age = user_info.get('age', '')
-                
-                # For backward compatibility: old data might have genderBinary
-                if not gender or gender == 'UNKNOWN':
-                    gender_binary = user_info.get('genderBinary', 1)
-                    gender = 'FEMALE' if gender_binary == 1 else 'MALE'
-                
-                # Check if age is a string date or a number
-                age_str = str(age)
-                if age_str.isdigit():
-                    # Convert age number to a birthdate string
-                    birth_year = datetime.now().year - int(age_str)
-                    age = f"{birth_year}-01-01T00:00:00Z"
-                
-                # Create person record
-                person_record = {
-                    'person_id': user_id,
-                    'gender': gender,
-                    'age': age,
-                    'update_date': datetime.now().isoformat()
-                }
-                
-                try:
-                    # Upsert person record
-                    self.service_client.table('person_dataset').upsert(person_record).execute()
-                    logger.info(f"Updated person record for {user_id}")
-                except Exception as e:
-                    logger.error(f"Error upserting person record: {e}", exc_info=True)
-                    success = False
-            
-            # Process heart rate data
-            if 'heartRate' in health_data and health_data['heartRate']:
-                heart_rate_records = []
-                
-                for record in health_data['heartRate']:
-                    try:
-                        # Extract date from ISO format
-                        start_date = record.get('startDate', '')
-                        if 'T' in start_date:
-                            date_str = start_date.split('T')[0]
-                        else:
-                            date_str = datetime.now().strftime('%Y-%m-%d')
-                        
-                        # Get the value as a number
-                        value = record.get('value')
-                        if isinstance(value, str):
-                            try:
-                                value = float(value)
-                            except:
-                                value = 0
-                        
-                        # Create heart rate record
-                        heart_rate_record = {
-                            'person_id': user_id,
-                            'date': date_str,
-                            'avg_rate': value
-                            # Only include columns that exist in the database schema
-                        }
-                        
-                        heart_rate_records.append(heart_rate_record)
-                    except Exception as e:
-                        logger.warning(f"Error processing heart rate record: {e}")
-                
-                if heart_rate_records:
-                    try:
-                        # Insert records in batches for efficiency
-                        for i in range(0, len(heart_rate_records), 10):
-                            batch = heart_rate_records[i:i+10]
-                            self.service_client.table('fitbit_heart_rate_level').upsert(batch).execute()
-                        
-                        logger.info(f"Inserted {len(heart_rate_records)} heart rate records")
-                    except Exception as e:
-                        logger.error(f"Error inserting heart rate records: {e}", exc_info=True)
-                        success = False
-            
-            # Process step data
-            if 'steps' in health_data and health_data['steps']:
-                step_records = []
-                
-                for record in health_data['steps']:
-                    try:
-                        # Extract date from ISO format
-                        start_date = record.get('startDate', '')
-                        if 'T' in start_date:
-                            date_str = start_date.split('T')[0]
-                        else:
-                            date_str = datetime.now().strftime('%Y-%m-%d')
-                        
-                        # Get the value as a number
-                        value = record.get('value')
-                        if isinstance(value, str):
-                            try:
-                                value = float(value)
-                            except:
-                                value = 0
-                        
-                        # Create step record
-                        step_record = {
-                            'person_id': user_id,
-                            'date': date_str,
-                            'sum_steps': int(value)
-                            # Only include columns that exist in the database schema
-                        }
-                        
-                        step_records.append(step_record)
-                    except Exception as e:
-                        logger.warning(f"Error processing step record: {e}")
-                
-                if step_records:
-                    try:
-                        # Insert records in batches for efficiency
-                        for i in range(0, len(step_records), 10):
-                            batch = step_records[i:i+10]
-                            self.service_client.table('fitbit_intraday_steps').upsert(batch).execute()
-                        
-                        logger.info(f"Inserted {len(step_records)} step records")
-                    except Exception as e:
-                        logger.error(f"Error inserting step records: {e}", exc_info=True)
-                        success = False
-
-            # Process activity data
-            if 'activeEnergy' in health_data and health_data['activeEnergy']:
-                activity_records = []
-                
-                for record in health_data['activeEnergy']:
-                    try:
-                        # Extract date from ISO format
-                        start_date = record.get('startDate', '')
-                        if 'T' in start_date:
-                            date_str = start_date.split('T')[0]
-                        else:
-                            date_str = datetime.now().strftime('%Y-%m-%d')
-                        
-                        # Get the value as a number
-                        value = record.get('value')
-                        if isinstance(value, str):
-                            try:
-                                value = float(value)
-                            except:
-                                value = 0
-                        
-                        # Create activity record (starting with just calories)
-                        activity_record = {
-                            'person_id': user_id,
-                            'date': date_str,
-                            'activity_calories': int(value),
-                            'very_active_minutes': 0,  # Default until workout data is processed
-                            'fairly_active_minutes': 0,
-                            'lightly_active_minutes': 0,
-                            'sedentary_minutes': 1440  # Default to full day
-                        }
-                        
-                        activity_records.append(activity_record)
-                    except Exception as e:
-                        logger.warning(f"Error processing activity record: {e}")
-                
-                # Process workout data to update activity records
-                if 'workout' in health_data and health_data['workout']:
-                    for record in health_data['workout']:
-                        try:
-                            # Extract date from ISO format
-                            start_date = record.get('startDate', '')
-                            if 'T' in start_date:
-                                date_str = start_date.split('T')[0]
-                            else:
-                                continue  # Skip if we can't get a date
-                            
-                            # Get the duration in minutes
-                            duration = record.get('duration', 0)
-                            if isinstance(duration, str):
-                                try:
-                                    duration = float(duration)
-                                except:
-                                    duration = 0
-                            
-                            # Convert to minutes
-                            minutes = int(duration / 60)
-                            
-                            # Find matching record by date
-                            for activity_record in activity_records:
-                                if activity_record['date'] == date_str:
-                                    # Update active minutes
-                                    activity_record['very_active_minutes'] += minutes
-                                    # Reduce sedentary minutes
-                                    activity_record['sedentary_minutes'] = max(0, activity_record['sedentary_minutes'] - minutes)
-                                    break
-                        except Exception as e:
-                            logger.warning(f"Error processing workout record: {e}")
-                
-                if activity_records:
-                    try:
-                        # Insert records in batches for efficiency
-                        for i in range(0, len(activity_records), 10):
-                            batch = activity_records[i:i+10]
-                            self.service_client.table('fitbit_activity').upsert(batch).execute()
-                        
-                        logger.info(f"Inserted {len(activity_records)} activity records")
-                    except Exception as e:
-                        logger.error(f"Error inserting activity records: {e}", exc_info=True)
-                        success = False
-            
-            # Process sleep data
-            if 'sleep' in health_data and health_data['sleep']:
-                sleep_records = []
-                
-                for record in health_data['sleep']:
-                    try:
-                        # Extract date from ISO format
-                        start_date = record.get('startDate', '')
-                        if 'T' in start_date:
-                            date_str = start_date.split('T')[0]
-                        else:
-                            date_str = datetime.now().strftime('%Y-%m-%d')
-                        
-                        # Get the value as a number
-                        value = record.get('value')
-                        if isinstance(value, str):
-                            try:
-                                value = float(value)
-                            except:
-                                value = 0
-                        
-                        # Create sleep record
-                        sleep_record = {
-                            'person_id': user_id,
-                            'sleep_date': date_str,
-                            'is_main_sleep': True,  # Default to main sleep
-                            'minute_in_bed': int(value) + 30,  # Asleep + awake
-                            'minute_asleep': int(value),
-                            'minute_after_wakeup': 10,  # Default placeholder
-                            'minute_awake': 20,  # Placeholder estimate
-                            'minute_restless': 10,  # Placeholder estimate
-                            'minute_deep': int(value) * 0.2,  # Placeholder: ~20% of sleep is deep
-                            'minute_light': int(value) * 0.5,  # Placeholder: ~50% of sleep is light
-                            'minute_rem': int(value) * 0.3,  # Placeholder: ~30% of sleep is REM
-                            'minute_wake': 20  # Same as minute_awake for consistency
-                        }
-                        
-                        sleep_records.append(sleep_record)
-                    except Exception as e:
-                        logger.warning(f"Error processing sleep record: {e}")
-                
-                if sleep_records:
-                    try:
-                        # Insert records in batches for efficiency
-                        for i in range(0, len(sleep_records), 10):
-                            batch = sleep_records[i:i+10]
-                            self.service_client.table('fitbit_sleep_daily_summary').upsert(batch).execute()
-                        
-                        logger.info(f"Inserted {len(sleep_records)} sleep records")
-                    except Exception as e:
-                        logger.error(f"Error inserting sleep records: {e}", exc_info=True)
-                        success = False
-            
-            return success
-            
-        except Exception as e:
-            logger.error(f"Error uploading health data: {str(e)}", exc_info=True)
-            return False
+        return sleep_stage_mapping.get(stage, 'light')  # Default to light sleep if unknown
     
     def get_latest_analysis(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Get the latest analysis result for a user"""
@@ -1145,6 +1084,7 @@ class SupabaseClient:
                 total_records = 0
                 has_more = True
                 
+                # Step 1: Fetch sleep summary data
                 while has_more:
                     sleep_result = self.service_client.table('fitbit_sleep_daily_summary') \
                         .select('*') \
@@ -1162,6 +1102,7 @@ class SupabaseClient:
                             end_time = date_time + timedelta(minutes=entry['minute_asleep'])
                             iso_end_date = end_time.isoformat() + 'Z'
                             
+                            # Create a main sleep record for the whole night
                             health_data["sleep"].append({
                                 "type": "HKCategoryTypeIdentifierSleepAnalysis",
                                 "startDate": iso_date,
@@ -1176,6 +1117,73 @@ class SupabaseClient:
                         
                         # Check if we have more records to fetch
                         has_more = records_fetched == batch_size
+                    else:
+                        has_more = False
+                
+                # Step 2: Fetch detailed sleep level data
+                offset = 0
+                has_more = True
+                
+                # Dictionary to map Fitbit sleep levels to HealthKit values
+                sleep_level_mapping = {
+                    'deep': '3',  # HKCategoryValueSleepAnalysisAsleepDeep
+                    'light': '5', # HKCategoryValueSleepAnalysisAsleepCore
+                    'rem': '4',   # HKCategoryValueSleepAnalysisAsleepREM
+                    'wake': '2',  # HKCategoryValueSleepAnalysisAwake
+                    'restless': '0' # HKCategoryValueSleepAnalysisInBed
+                }
+                
+                while has_more:
+                    # Order by seconds_from_start_of_day to maintain chronological sequence
+                    level_result = self.service_client.table('fitbit_sleep_level') \
+                        .select('*') \
+                        .eq('person_id', user_id) \
+                        .gte('sleep_date', start_date_str) \
+                        .order('seconds_from_start_of_day', desc=False) \
+                        .range(offset, offset + batch_size - 1) \
+                        .execute()
+                        
+                    if level_result.data:
+                        for level_entry in level_result.data:
+                            # Get the sleep date and original timestamp
+                            sleep_date_str = level_entry['sleep_date']
+                            time_str = level_entry.get('date', f"{sleep_date_str} 22:00:00")
+                            
+                            try:
+                                # Parse the start time
+                                start_dt = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+                                iso_start = start_dt.isoformat() + 'Z'
+                                
+                                # Calculate end time based on duration
+                                duration_min = level_entry.get('duration_in_min', 0)
+                                end_dt = start_dt + timedelta(minutes=duration_min)
+                                iso_end = end_dt.isoformat() + 'Z'
+                                
+                                # Map Fitbit sleep level to HealthKit value
+                                level = level_entry.get('level', 'light')
+                                hk_value = sleep_level_mapping.get(level, '1')  # Default to asleep unspecified
+                                
+                                # Add detailed sleep stage data
+                                health_data["sleep"].append({
+                                    "type": "HKCategoryTypeIdentifierSleepAnalysis",
+                                    "startDate": iso_start,
+                                    "endDate": iso_end,
+                                    "value": hk_value,
+                                    "sleep_stage": level,
+                                    "duration": duration_min,
+                                    "unit": "min",
+                                    "seconds_from_start_of_day": level_entry.get('seconds_from_start_of_day', 0)
+                                })
+                            except Exception as e:
+                                logger.warning(f"Error processing sleep level entry: {e}")
+                                continue
+                        
+                        level_records_fetched = len(level_result.data)
+                        total_records += level_records_fetched
+                        offset += batch_size
+                        
+                        # Check if we have more records to fetch
+                        has_more = level_records_fetched == batch_size
                     else:
                         has_more = False
                 

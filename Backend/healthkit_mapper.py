@@ -24,6 +24,24 @@ class HealthKitToFitbitMapper:
     def __init__(self):
         """Initialize the HealthKit to Fitbit mapper"""
         logger.info("HealthKit to Fitbit mapper initialized")
+        
+        # Define heart rate zone boundaries
+        self.heart_rate_zones = {
+            "Out of Range": {"min": 30, "max": 99},
+            "Fat Burn": {"min": 99, "max": 139},
+            "Cardio": {"min": 139, "max": 169},
+            "Peak": {"min": 169, "max": 220}
+        }
+        
+        # Sleep stage mapping from HealthKit to Fitbit
+        self.sleep_stage_mapping = {
+            "HKCategoryValueSleepAnalysisInBed": "restless",
+            "HKCategoryValueSleepAnalysisAsleepUnspecified": "light",
+            "HKCategoryValueSleepAnalysisAsleepCore": "light",
+            "HKCategoryValueSleepAnalysisAsleepDeep": "deep",
+            "HKCategoryValueSleepAnalysisAsleepREM": "rem",
+            "HKCategoryValueSleepAnalysisAwake": "wake"
+        }
     
     def convert_to_fitbit_format(self, extracted_data: Dict[str, pd.DataFrame], person_id: str) -> Dict[str, pd.DataFrame]:
         """
@@ -40,7 +58,13 @@ class HealthKitToFitbitMapper:
         
         # Convert heart rate data
         if 'heart_rate' in extracted_data and not extracted_data['heart_rate'].empty:
+            # Create both heart rate level and heart rate summary
             fitbit_data['fitbit_heart_rate_level'] = self._convert_heart_rate_data(
+                extracted_data['heart_rate'], person_id
+            )
+            
+            # Add heart rate summary table
+            fitbit_data['fitbit_heart_rate_summary'] = self._convert_heart_rate_summary(
                 extracted_data['heart_rate'], person_id
             )
         
@@ -78,6 +102,80 @@ class HealthKitToFitbitMapper:
             logger.info(f"Converted to {data_type}: {len(df)} records")
         
         return fitbit_data
+    
+    def _convert_heart_rate_summary(self, heart_rate_df: pd.DataFrame, person_id: str) -> pd.DataFrame:
+        """
+        Convert HealthKit heart rate data to Fitbit heart rate summary format with zone information.
+        
+        Args:
+            heart_rate_df: DataFrame with heart rate data from HealthKit
+            person_id: User ID
+            
+        Returns:
+            DataFrame in Fitbit heart_rate_summary format
+        """
+        if heart_rate_df.empty:
+            return pd.DataFrame(columns=[
+                'person_id', 'date', 'zone_name', 'min_heart_rate', 
+                'max_heart_rate', 'minute_in_zone', 'calorie_count'
+            ])
+        
+        # Group heart rate data by day
+        try:
+            if 'date' not in heart_rate_df.columns:
+                heart_rate_df['date'] = pd.to_datetime(heart_rate_df['startDate']).dt.date
+        except Exception as e:
+            logger.error(f"Error converting dates: {e}")
+            # If error in conversion, try a direct assignment
+            heart_rate_df['date'] = [d.date() if isinstance(d, datetime) else datetime.now().date() 
+                                for d in heart_rate_df['startDate']]
+        
+        # Calculate daily heart rate zones
+        result_data = []
+        
+        for date, group in heart_rate_df.groupby('date'):
+            try:
+                # Calculate min and max heart rates for the day
+                min_hr = group['value'].min()
+                max_hr = group['value'].max()
+                
+                # Calculate time spent in each heart rate zone
+                for zone_name, zone_range in self.heart_rate_zones.items():
+                    zone_data = group[(group['value'] >= zone_range['min']) & 
+                                    (group['value'] <= zone_range['max'])]
+                    
+                    if not zone_data.empty:
+                        # Calculate total minutes in zone (assuming data points are 1 minute apart)
+                        minutes_in_zone = len(zone_data)
+                        
+                        # Estimate calorie count (simple estimate - can be improved)
+                        avg_hr = zone_data['value'].mean()
+                        calorie_count = int(minutes_in_zone * avg_hr * 0.1)
+                        
+                        zone_min_hr = zone_data['value'].min()
+                        zone_max_hr = zone_data['value'].max()
+                        
+                        result_data.append({
+                            'person_id': person_id,
+                            'date': str(date),
+                            'zone_name': zone_name,
+                            'min_heart_rate': int(zone_min_hr),
+                            'max_heart_rate': int(zone_max_hr),
+                            'minute_in_zone': int(minutes_in_zone),
+                            'calorie_count': int(calorie_count)
+                        })
+            except Exception as e:
+                logger.error(f"Error processing heart rate zone for date {date}: {e}")
+                continue
+        
+        # Return empty dataframe if no valid data
+        if not result_data:
+            return pd.DataFrame(columns=[
+                'person_id', 'date', 'zone_name', 'min_heart_rate', 
+                'max_heart_rate', 'minute_in_zone', 'calorie_count'
+            ])
+            
+        return pd.DataFrame(result_data)
     
     def _convert_heart_rate_data(self, heart_rate_df: pd.DataFrame, person_id: str) -> pd.DataFrame:
         """
@@ -241,7 +339,7 @@ class HealthKitToFitbitMapper:
     
     def _convert_sleep_data(self, sleep_df: pd.DataFrame, person_id: str) -> tuple:
         """
-        Convert HealthKit sleep data to Fitbit sleep formats.
+        Convert HealthKit sleep data to Fitbit sleep formats with improved stage mapping and session handling.
         
         Args:
             sleep_df: DataFrame with sleep data from HealthKit
@@ -253,128 +351,151 @@ class HealthKitToFitbitMapper:
         if sleep_df.empty:
             return pd.DataFrame(), pd.DataFrame()
         
-        # Process sleep data to get daily summaries
-        # Ensure sleep_date is available
-        if 'sleep_date' not in sleep_df.columns and 'startDate' in sleep_df.columns:
-            sleep_df['sleep_date'] = sleep_df['startDate'].dt.date
+        # Convert dates to datetime objects if needed
+        try:
+            sleep_df['startDate'] = pd.to_datetime(sleep_df['startDate'])
+            sleep_df['endDate'] = pd.to_datetime(sleep_df['endDate'])
+        except Exception as e:
+            logger.error(f"Error converting sleep dates: {e}")
+            return pd.DataFrame(), pd.DataFrame()
         
-        # Calculate summary by date
-        sleep_summary = sleep_df.groupby('sleep_date').agg({
-            'duration_minutes': 'sum',
-            'startDate': 'min',
-            'endDate': 'max',
-        }).reset_index()
+        # Get sleep session date (the date when sleep started)
+        sleep_df['sleep_date'] = sleep_df['startDate'].dt.date
         
-        # Create daily summary records
-        summary_records = []
-        level_records = []
+        # Calculate duration in minutes from explicit duration field or time difference
+        if 'duration' in sleep_df.columns:
+            sleep_df['duration_minutes'] = sleep_df['duration']
+            logger.info("Using explicit duration field from iOS app for sleep data in mapper")
+        elif 'duration_minutes' not in sleep_df.columns:  # Check if already calculated by the extractor
+            # Calculate from time difference as fallback
+            sleep_df['duration_minutes'] = (
+                (sleep_df['endDate'] - sleep_df['startDate']).dt.total_seconds() / 60
+            ).astype(int)
+            logger.info("Calculated sleep duration from timestamps in mapper (fallback method)")
         
-        for _, row in sleep_summary.iterrows():
-            date = row['sleep_date']
-            start_time = row['startDate']
-            end_time = row['endDate']
-            total_minutes = row['duration_minutes']
+        # Enhanced sleep stage mapping with more accurate Fitbit equivalents
+        # Reference: https://dev.fitbit.com/build/reference/web-api/sleep/
+        apple_to_fitbit_stage = {
+            # Apple Watch sleep stages (numeric values)
+            '0': 'restless',        # In Bed
+            '1': 'light',           # Asleep (unspecified)
+            '2': 'wake',            # Awake
+            '3': 'deep',            # Deep
+            '4': 'rem',             # REM
+            '5': 'light',           # Core (equivalent to Fitbit's light)
             
-            # Filter sleep_df for this date to get sleep levels
-            date_sleep = sleep_df[sleep_df['sleep_date'] == date]
-            
-            # Extract sleep stages if available
-            minute_asleep = 0
-            minute_deep = 0
-            minute_light = 0
-            minute_rem = 0
-            minute_wake = 0
-            minute_after_wakeup = 0
-            minute_awake = 0
-            minute_restless = 0
-            
-            if 'sleep_stage' in date_sleep.columns:
-                for _, stage_row in date_sleep.iterrows():
-                    stage = stage_row.get('sleep_stage', 'unknown')
-                    duration = stage_row.get('duration_minutes', 0)
-                    
-                    if stage in ['asleep', 'deep', 'light', 'rem']:
-                        minute_asleep += duration
-                        
-                        if stage == 'deep':
-                            minute_deep += duration
-                        elif stage == 'light' or stage == 'core':
-                            minute_light += duration
-                        elif stage == 'rem':
-                            minute_rem += duration
-                    elif stage == 'awake':
-                        minute_awake += duration
-                    elif stage == 'inBed':
-                        # In bed but not asleep is considered restless
-                        minute_restless += duration
-            else:
-                # If no sleep stage data, assume all duration is asleep
-                minute_asleep = total_minutes
-            
-            # Calculate minute_in_bed as the total of all sleep states
-            minute_in_bed = minute_asleep + minute_awake + minute_restless
-            
-            # Create daily summary record - using exact column names from Supabase
-            summary_records.append({
-                'person_id': person_id,
-                'sleep_date': str(date),
-                'is_main_sleep': True,  # Default to main sleep
-                'minute_in_bed': int(minute_in_bed),
-                'minute_asleep': int(minute_asleep),
-                'minute_after_wakeup': int(minute_after_wakeup),
-                'minute_awake': int(minute_awake),
-                'minute_restless': int(minute_restless),
-                'minute_deep': int(minute_deep),
-                'minute_light': int(minute_light),
-                'minute_rem': int(minute_rem),
-                'minute_wake': int(minute_wake)
+            # Apple Watch sleep stages (string values)
+            'HKCategoryValueSleepAnalysisInBed': 'restless',
+            'HKCategoryValueSleepAnalysisAsleepUnspecified': 'light',
+            'HKCategoryValueSleepAnalysisAsleepCore': 'light',
+            'HKCategoryValueSleepAnalysisAsleepDeep': 'deep',
+            'HKCategoryValueSleepAnalysisAsleepREM': 'rem',
+            'HKCategoryValueSleepAnalysisAwake': 'wake'
+        }
+        
+        # Map sleep stages using enhanced mapping
+        if 'value' in sleep_df.columns:
+            sleep_df['level'] = sleep_df['value'].astype(str).map(
+                lambda x: apple_to_fitbit_stage.get(x, 'light')  # Default to light if unknown
+            )
+        elif 'sleep_stage' in sleep_df.columns:
+            # The iOS app may have already converted to sleep_stage
+            sleep_df['level'] = sleep_df['sleep_stage'].map({
+                'in_bed': 'restless',
+                'asleep': 'light',
+                'awake': 'wake',
+                'deep': 'deep',
+                'rem': 'rem',
+                'core': 'light',
+                'unknown': 'light'
             })
+        else:
+            logger.warning("No sleep stage information found in sleep data")
+            sleep_df['level'] = 'light'  # Default value
+        
+        # Handle sleep sessions that span midnight
+        # Group by session ID if available, otherwise try to identify sessions by timestamp proximity
+        if 'sessionID' in sleep_df.columns:
+            logger.info("Using sessionID from iOS app for sleep session identification")
+            sleep_df['session_id'] = sleep_df['sessionID']
+        else:
+            # Sort by start time
+            sleep_df = sleep_df.sort_values('startDate')
             
-            # Create sleep level records - using exact column names from Supabase
-            if 'sleep_stage' in date_sleep.columns:
-                # Create a unique sleep ID for this night
-                sleep_id = f"{person_id}-{date}-{hash(str(start_time))}"[:36]
-                level_id = 1
+            # Identify sleep sessions (gap of more than 30 minutes indicates a new session)
+            sleep_df['time_diff'] = sleep_df['startDate'].diff().dt.total_seconds() / 60
+            sleep_df['new_session'] = (sleep_df['time_diff'] > 30) | (sleep_df['time_diff'].isna())
+            sleep_df['session_id'] = sleep_df['new_session'].cumsum()
+            logger.info("Generated session IDs based on time proximity for sleep data")
+        
+        # Create daily summary with accurate session information
+        daily_sleep = []
+        
+        # Process each date separately
+        for sleep_date, date_group in sleep_df.groupby('sleep_date'):
+            # Find all sessions for this date
+            for session_id, session_data in date_group.groupby('session_id'):
+                # Calculate session metrics
+                session_start = session_data['startDate'].min()
+                session_end = session_data['endDate'].max()
                 
-                # Track sleep stages for this date
-                for _, stage_row in date_sleep.iterrows():
-                    stage = stage_row.get('sleep_stage', 'unknown')
-                    start = stage_row.get('startDate')
-                    end = stage_row.get('endDate')
-                    duration = stage_row.get('duration_minutes', 0)
-                    
-                    # Map sleep stage to Fitbit format
-                    if stage == 'deep':
-                        level_value = 'deep'
-                    elif stage == 'rem':
-                        level_value = 'rem'
-                    elif stage in ['light', 'core']:
-                        level_value = 'light'
-                    elif stage == 'awake':
-                        level_value = 'wake'
-                    elif stage == 'asleep':
-                        level_value = 'asleep'
-                    elif stage == 'inBed':
-                        level_value = 'restless'
-                    else:
-                        level_value = 'unknown'
-                    
-                    # Create sleep level record for this segment with exact column names from Supabase
-                    level_records.append({
-                        'person_id': person_id,
-                        'sleep_date': str(date),
-                        'sleep_id': sleep_id,
-                        'is_main_sleep': True,
-                        'level_id': level_id,
-                        'level': level_value,
-                        'start_time': start,
-                        'end_time': end,
-                        'duration': int(duration)
-                    })
-                    level_id += 1
+                # Calculate time in each sleep stage for this session
+                in_bed_time = session_data['duration_minutes'].sum()
+                
+                # Calculate time in each sleep stage
+                asleep_time = session_data[session_data['level'].isin(['light', 'deep', 'rem'])]['duration_minutes'].sum()
+                deep_time = session_data[session_data['level'] == 'deep']['duration_minutes'].sum()
+                light_time = session_data[session_data['level'] == 'light']['duration_minutes'].sum()
+                rem_time = session_data[session_data['level'] == 'rem']['duration_minutes'].sum()
+                awake_time = session_data[session_data['level'] == 'wake']['duration_minutes'].sum()
+                restless_time = session_data[session_data['level'] == 'restless']['duration_minutes'].sum()
+                
+                # Calculate time after wakeup (more accurate estimation)
+                after_wakeup_time = 0
+                if 'wake' in session_data['level'].values:
+                    # Get wake segments
+                    wake_segments = session_data[session_data['level'] == 'wake'].sort_values('startDate')
+                    # If last segment is wake and it's at the end of the session, use it as after_wakeup
+                    if not wake_segments.empty and wake_segments.iloc[-1]['startDate'] > session_start + pd.Timedelta(hours=4):
+                        after_wakeup_time = wake_segments.iloc[-1]['duration_minutes']
+                
+                # Create daily summary record for this session
+                daily_sleep.append({
+                    'person_id': person_id,
+                    'sleep_date': str(sleep_date),
+                    'is_main_sleep': 1,  # Assume main sleep for now
+                    'minute_in_bed': int(in_bed_time),
+                    'minute_asleep': int(asleep_time),
+                    'minute_after_wakeup': int(after_wakeup_time),
+                    'minute_awake': int(awake_time),
+                    'minute_restless': int(restless_time),
+                    'minute_deep': int(deep_time),
+                    'minute_light': int(light_time),
+                    'minute_rem': int(rem_time),
+                    'minute_wake': int(awake_time)
+                })
         
-        # Create DataFrames
-        daily_summary_df = pd.DataFrame(summary_records)
-        sleep_level_df = pd.DataFrame(level_records)
+        # Create sleep level dataframe with precise timestamps and durations
+        sleep_levels = []
         
-        return daily_summary_df, sleep_level_df
+        for _, row in sleep_df.iterrows():
+            # Calculate seconds from start of day for better sorting
+            seconds_from_start_of_day = (row['startDate'] - 
+                                         pd.Timestamp.combine(row['sleep_date'], pd.Timestamp.min.time())).total_seconds()
+            
+            sleep_levels.append({
+                'person_id': person_id,
+                'sleep_date': str(row['sleep_date']),
+                'is_main_sleep': 1,  # Assume main sleep for now
+                'level': row['level'],
+                'date': row['startDate'].strftime('%Y-%m-%d %H:%M:%S'),
+                'duration_in_min': int(row['duration_minutes']),
+                'seconds_from_start_of_day': int(seconds_from_start_of_day)
+            })
+        
+        sleep_daily_summary_df = pd.DataFrame(daily_sleep)
+        sleep_level_df = pd.DataFrame(sleep_levels)
+        
+        logger.info(f"Converted {len(sleep_df)} sleep records into {len(sleep_daily_summary_df)} daily summaries and {len(sleep_level_df)} sleep level entries")
+        
+        return sleep_daily_summary_df, sleep_level_df

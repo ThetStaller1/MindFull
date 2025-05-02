@@ -194,9 +194,17 @@ class HealthKitExtractor:
         if 'sleep_analysis' in extracted_data and not extracted_data['sleep_analysis'].empty:
             sleep_df = extracted_data['sleep_analysis']
             
-            # Calculate sleep time in minutes
+            # Calculate sleep time in minutes - prefer explicit duration field if available
             sleep_df['sleep_date'] = pd.to_datetime(sleep_df['startDate']).dt.date
-            sleep_df['minute_asleep'] = (pd.to_datetime(sleep_df['endDate']) - pd.to_datetime(sleep_df['startDate'])).dt.total_seconds() / 60
+            
+            # Check if explicit duration field exists
+            if 'duration' in sleep_df.columns:
+                sleep_df['minute_asleep'] = sleep_df['duration']
+                logger.info("Using explicit duration field for sleep summary calculations")
+            else:
+                # Fall back to calculating from time difference
+                sleep_df['minute_asleep'] = (pd.to_datetime(sleep_df['endDate']) - pd.to_datetime(sleep_df['startDate'])).dt.total_seconds() / 60
+                logger.info("Calculated sleep duration from timestamps for summary (fallback method)")
             
             # Group by date
             sleep_daily = sleep_df.groupby('sleep_date').agg({
@@ -221,12 +229,15 @@ class HealthKitExtractor:
                 sleep_level_records = []
                 
                 for _, row in sleep_df.iterrows():
+                    # Get duration from either the explicit duration field or the calculated minute_asleep
+                    duration = row.get('duration', row['minute_asleep'])
+                    
                     sleep_level_records.append({
                         'person_id': person_id or '1001',
                         'sleep_date': row['sleep_date'].strftime('%Y-%m-%d'),
                         'level': 'light',  # Default level
                         'start_time': pd.to_datetime(row['startDate']).strftime('%H:%M:%S'),
-                        'duration': int(row['minute_asleep'])
+                        'duration': int(duration)
                     })
                 
                 if sleep_level_records:
@@ -424,7 +435,7 @@ class HealthKitExtractor:
         return df
     
     def _extract_sleep_data(self, sleep_data: List[Dict[str, Any]]) -> pd.DataFrame:
-        """Extract and process sleep analysis data"""
+        """Extract and process sleep analysis data with improved session handling"""
         if not sleep_data:
             return pd.DataFrame()
         
@@ -437,13 +448,26 @@ class HealthKitExtractor:
         if 'endDate' in df.columns:
             df['endDate'] = pd.to_datetime(df['endDate'])
         
-        # Calculate duration in minutes
-        if 'startDate' in df.columns and 'endDate' in df.columns:
+        # Calculate duration in minutes - prefer explicit duration field if available
+        if 'duration' in df.columns:
+            # Use the explicit duration field sent from iOS app
+            df['duration_minutes'] = df['duration']
+            logger.info("Using explicit duration field from iOS app for sleep data")
+        elif 'startDate' in df.columns and 'endDate' in df.columns:
+            # Fall back to calculating from time difference
             df['duration_minutes'] = (df['endDate'] - df['startDate']).dt.total_seconds() / 60
+            logger.info("Calculated sleep duration from timestamps (fallback method)")
         
         # Extract sleep date (the date when sleep started)
         if 'startDate' in df.columns:
             df['sleep_date'] = df['startDate'].dt.date
+        
+        # Preserve session ID if available
+        if 'sessionID' in df.columns:
+            logger.info("Found sleep session IDs in the data")
+        else:
+            # If no session ID, we'll identify sessions in the mapper
+            logger.info("No sleep session IDs found, will identify sessions by time proximity in mapper")
         
         # Convert sleep stage value if present
         if 'value' in df.columns:
@@ -462,6 +486,10 @@ class HealthKitExtractor:
             df['sleep_stage'] = df['value'].astype(str).map(
                 lambda x: sleep_stage_map.get(x, x)
             )
+        
+        # If sleep_stage field is directly available (from iOS app), use it
+        if 'sleep_stage' in df.columns:
+            logger.info("Sleep stage information available directly")
         
         return df
     
@@ -494,4 +522,16 @@ class HealthKitExtractor:
             if field in df.columns:
                 df[field] = pd.to_numeric(df[field], errors='coerce')
         
-        return df 
+        return df
+    
+    def _calculate_seconds_from_midnight(self, timestamp: datetime) -> int:
+        """Calculate seconds from midnight (start of day) for a timestamp.
+        
+        Args:
+            timestamp: The datetime to calculate from
+            
+        Returns:
+            Integer number of seconds from midnight
+        """
+        midnight = datetime.combine(timestamp.date(), datetime.min.time())
+        return int((timestamp - midnight).total_seconds()) 

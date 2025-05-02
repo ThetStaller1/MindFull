@@ -44,24 +44,28 @@ struct HealthKitDataPoint {
     let id: UUID
     let type: DataType
     let timestamp: Date
+    let endTimestamp: Date?  // Added for sleep data to capture end time explicitly
     let value: Double
     let unit: String
     let sleepStage: SleepStage?
     let source: String
+    let sessionID: String?  // Added for grouping related sleep entries
     
     // Workout-specific fields
     let workoutActivityType: Int?
     let totalEnergyBurned: Double?
     let totalDistance: Double?
     
-    init(id: UUID = UUID(), type: DataType, timestamp: Date, value: Double, unit: String, sleepStage: SleepStage? = nil, source: String, workoutActivityType: Int? = nil, totalEnergyBurned: Double? = nil, totalDistance: Double? = nil) {
+    init(id: UUID = UUID(), type: DataType, timestamp: Date, endTimestamp: Date? = nil, value: Double, unit: String, sleepStage: SleepStage? = nil, source: String, sessionID: String? = nil, workoutActivityType: Int? = nil, totalEnergyBurned: Double? = nil, totalDistance: Double? = nil) {
         self.id = id
         self.type = type
         self.timestamp = timestamp
+        self.endTimestamp = endTimestamp
         self.value = value
         self.unit = unit
         self.sleepStage = sleepStage
         self.source = source
+        self.sessionID = sessionID
         self.workoutActivityType = workoutActivityType
         self.totalEnergyBurned = totalEnergyBurned
         self.totalDistance = totalDistance
@@ -70,20 +74,29 @@ struct HealthKitDataPoint {
     func toDictionary() -> [String: Any] {
         // Format to match exact backend expectations
         let formattedTimestamp = formatDate(timestamp)
+        let formattedEndTimestamp = endTimestamp != nil ? formatDate(endTimestamp!) : formattedTimestamp
         
         var dict: [String: Any] = [
             "type": type.rawValue,  // Will be converted to HealthKit identifier format in APIService
             "timestamp": formattedTimestamp,
             "startDate": formattedTimestamp,  // Include both formats to ensure compatibility
-            "endDate": formattedTimestamp,
+            "endDate": formattedEndTimestamp,
             "value": value,
             "unit": unit,
             "source": source
         ]
         
+        // Add session ID if available
+        if let sessionID = sessionID {
+            dict["sessionID"] = sessionID
+        }
+        
         // Handle sleep data specifically
         if type == .sleepAnalysis, let sleepStage = sleepStage {
             dict["sleep_stage"] = sleepStage.rawValue
+            
+            // Store the duration in minutes in a dedicated field
+            dict["duration"] = value  // The 'value' already contains duration in minutes
             
             // Add additional fields needed for sleep analysis
             // Convert sleep stage to value for backend

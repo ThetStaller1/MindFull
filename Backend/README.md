@@ -127,4 +127,58 @@ python test_mental_health_model.py --data_dir converted_data --model_dir model
 This allows you to verify that:
 1. The iOS app is sending data in the correct format
 2. The data transformation logic is working as expected
-3. The mental health model is producing accurate results 
+3. The mental health model is producing accurate results
+
+# MindFull Backend Updates
+
+## Data Processing Enhancements
+
+This update addresses issues with data processing and Supabase storage in the MindFull application. The primary focus is on ensuring that health data is properly stored in the required Supabase tables, specifically `fitbit_heart_rate_summary` and `fitbit_sleep_level` which were previously missing.
+
+### Key Changes
+
+1. **Enhanced Heart Rate Processing**
+   - Added support for generating heart rate zone summaries
+   - Implemented calculation of time spent in heart rate zones
+   - Created proper mapping to the `fitbit_heart_rate_summary` table
+
+2. **Enhanced Sleep Data Processing**
+   - Improved sleep stage mapping from HealthKit to Fitbit format
+   - Added support for generating detailed sleep level records
+   - Fixed sleep duration calculations for more accurate reporting
+   - Ensured proper mapping to the `fitbit_sleep_level` table
+
+3. **Supabase Client Updates**
+   - Updated health data storage to include all required tables
+   - Implemented proper data transformation for Supabase compatibility
+   - Added batch processing for efficient data upload
+
+### Technical Implementation
+
+The implementation was based on the conversion logic found in the test files (`test_xml_converter.py`, `test_healthkit_mapper.py`, and `test_healthkit_extractor.py`), but adapted to work with the direct HealthKit data received from the iOS app.
+
+#### Modified Files:
+
+1. **Backend/healthkit_mapper.py**
+   - Added `_convert_heart_rate_summary()` method to generate heart rate zone statistics
+   - Updated sleep data processing to include detailed sleep level information
+   - Implemented proper stage mapping from HealthKit to Fitbit sleep stages
+
+2. **Backend/supabase_client.py**
+   - Enhanced `upload_health_data()` to support all required Supabase tables
+   - Added heart rate summary processing including zone calculations
+   - Added proper sleep level processing and storage
+
+### Data Flow
+
+The updated data flow is as follows:
+
+1. iOS app collects HealthKit data (heart rate, steps, sleep, etc.)
+2. Data is sent to the backend API
+3. Backend processes the data using `healthkit_extractor.py` and `healthkit_mapper.py`
+4. Transformed data is stored in all required Supabase tables
+5. Stored data is used for mental health analysis
+
+### Respiratory Rate Data
+
+Per requirements, respiratory rate data is not processed. The iOS app may still collect this data, but it is ignored during the processing and storage phases. 

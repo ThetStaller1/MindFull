@@ -208,6 +208,35 @@ class APIService {
                     request.basalEnergy.append(dataPoint)
                 case "sleep_analysis":
                     dataPoint["type"] = "HKCategoryTypeIdentifierSleepAnalysis"
+                    
+                    // Save the original duration value
+                    let duration = dataPoint["duration"] as? Double
+                    
+                    // Convert numeric sleep stage values to HealthKit string identifiers
+                    if let value = dataPoint["value"] as? Int {
+                        switch value {
+                        case 0:
+                            dataPoint["value"] = "HKCategoryValueSleepAnalysisInBed"
+                        case 1:
+                            dataPoint["value"] = "HKCategoryValueSleepAnalysisAsleepUnspecified"
+                        case 2:
+                            dataPoint["value"] = "HKCategoryValueSleepAnalysisAwake"
+                        case 3:
+                            dataPoint["value"] = "HKCategoryValueSleepAnalysisAsleepDeep"
+                        case 4:
+                            dataPoint["value"] = "HKCategoryValueSleepAnalysisAsleepREM"
+                        case 5:
+                            dataPoint["value"] = "HKCategoryValueSleepAnalysisAsleepCore"
+                        default:
+                            dataPoint["value"] = "HKCategoryValueSleepAnalysisAsleepUnspecified"
+                        }
+                    }
+                    
+                    // Re-apply the duration value after converting sleep stage
+                    if let duration = duration {
+                        dataPoint["duration"] = duration
+                    }
+                    
                     request.sleep.append(dataPoint)
                 case "workout":
                     dataPoint["type"] = "HKWorkoutTypeIdentifier"

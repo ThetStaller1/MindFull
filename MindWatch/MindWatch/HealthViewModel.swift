@@ -336,7 +336,10 @@ class HealthViewModel: ObservableObject {
             let sleepType = HKCategoryType(.sleepAnalysis)
             let predicate = HKQuery.predicateForSamples(withStart: startDate, end: Date(), options: .strictStartDate)
             
-            let query = HKSampleQuery(sampleType: sleepType, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
+            // Sort by start date to help identify sleep sessions
+            let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
+            
+            let query = HKSampleQuery(sampleType: sleepType, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: [sortDescriptor]) { _, samples, error in
                 
                 if let error = error {
                     continuation.resume(throwing: error)
@@ -348,26 +351,62 @@ class HealthViewModel: ObservableObject {
                     return
                 }
                 
-                let sleepData = samples.compactMap { sample -> HealthKitDataPoint? in
-                    guard let categorySample = sample as? HKCategorySample else {
-                        return nil
+                // Group samples into sleep sessions based on proximity in time
+                var sleepSessions: [[HKCategorySample]] = []
+                var currentSession: [HKCategorySample] = []
+                var lastEndDate: Date?
+                
+                // First, sort samples by start date to ensure proper sequencing
+                let sortedSamples = samples.compactMap { $0 as? HKCategorySample }.sorted { $0.startDate < $1.startDate }
+                
+                // Group samples into sessions (sleep entries within 30 minutes of each other are considered the same session)
+                for sample in sortedSamples {
+                    if let lastEnd = lastEndDate, sample.startDate.timeIntervalSince(lastEnd) > 30 * 60 {
+                        // Gap of more than 30 minutes - this is a new session
+                        if !currentSession.isEmpty {
+                            sleepSessions.append(currentSession)
+                            currentSession = []
+                        }
                     }
                     
-                    // Duration in minutes as the value
-                    let durationMinutes = categorySample.endDate.timeIntervalSince(categorySample.startDate) / 60
+                    currentSession.append(sample)
+                    lastEndDate = sample.endDate
+                }
+                
+                // Add the last session if not empty
+                if !currentSession.isEmpty {
+                    sleepSessions.append(currentSession)
+                }
+                
+                // Process each session and create HealthKitDataPoint objects
+                var sleepData: [HealthKitDataPoint] = []
+                
+                for (sessionIndex, session) in sleepSessions.enumerated() {
+                    // Create a unique session ID based on the first entry's start time
+                    let sessionStartTime = session.first!.startDate
+                    let sessionID = "sleep_session_\(sessionIndex)_\(Int(sessionStartTime.timeIntervalSince1970))"
                     
-                    // Get sleep stage from the value
-                    let sleepStageValue = String(categorySample.value)
-                    let sleepStage = HealthKitDataPoint.SleepStage.fromHealthKitValue(sleepStageValue)
-                    
-                    return HealthKitDataPoint(
-                        type: .sleepAnalysis,
-                        timestamp: categorySample.startDate,
-                        value: durationMinutes,
-                        unit: "minutes",
-                        sleepStage: sleepStage,
-                        source: categorySample.sourceRevision.source.name
-                    )
+                    for categorySample in session {
+                        // Duration in minutes
+                        let durationMinutes = categorySample.endDate.timeIntervalSince(categorySample.startDate) / 60
+                        
+                        // Get sleep stage from the value
+                        let sleepStageValue = String(categorySample.value)
+                        let sleepStage = HealthKitDataPoint.SleepStage.fromHealthKitValue(sleepStageValue)
+                        
+                        let dataPoint = HealthKitDataPoint(
+                            type: .sleepAnalysis,
+                            timestamp: categorySample.startDate,
+                            endTimestamp: categorySample.endDate,
+                            value: durationMinutes,
+                            unit: "minutes",
+                            sleepStage: sleepStage,
+                            source: categorySample.sourceRevision.source.name,
+                            sessionID: sessionID
+                        )
+                        
+                        sleepData.append(dataPoint)
+                    }
                 }
                 
                 continuation.resume(returning: sleepData)
