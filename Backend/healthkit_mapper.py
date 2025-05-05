@@ -353,8 +353,10 @@ class HealthKitToFitbitMapper:
         
         # Convert dates to datetime objects if needed
         try:
-            sleep_df['startDate'] = pd.to_datetime(sleep_df['startDate'])
-            sleep_df['endDate'] = pd.to_datetime(sleep_df['endDate'])
+            if not pd.api.types.is_datetime64_any_dtype(sleep_df['startDate']):
+                sleep_df['startDate'] = pd.to_datetime(sleep_df['startDate'])
+            if not pd.api.types.is_datetime64_any_dtype(sleep_df['endDate']):
+                sleep_df['endDate'] = pd.to_datetime(sleep_df['endDate'])
         except Exception as e:
             logger.error(f"Error converting sleep dates: {e}")
             return pd.DataFrame(), pd.DataFrame()
@@ -362,138 +364,178 @@ class HealthKitToFitbitMapper:
         # Get sleep session date (the date when sleep started)
         sleep_df['sleep_date'] = sleep_df['startDate'].dt.date
         
-        # Calculate duration in minutes from explicit duration field or time difference
-        if 'duration' in sleep_df.columns:
-            sleep_df['duration_minutes'] = sleep_df['duration']
-            logger.info("Using explicit duration field from iOS app for sleep data in mapper")
-        elif 'duration_minutes' not in sleep_df.columns:  # Check if already calculated by the extractor
-            # Calculate from time difference as fallback
+        # Calculate duration in minutes
+        if 'duration_minutes' not in sleep_df.columns:
             sleep_df['duration_minutes'] = (
                 (sleep_df['endDate'] - sleep_df['startDate']).dt.total_seconds() / 60
             ).astype(int)
-            logger.info("Calculated sleep duration from timestamps in mapper (fallback method)")
+            logger.info("Calculated sleep duration from timestamps in mapper")
         
-        # Enhanced sleep stage mapping with more accurate Fitbit equivalents
-        # Reference: https://dev.fitbit.com/build/reference/web-api/sleep/
+        # Enhanced sleep stage mapping
         apple_to_fitbit_stage = {
-            # Apple Watch sleep stages (numeric values)
-            '0': 'restless',        # In Bed
-            '1': 'light',           # Asleep (unspecified)
-            '2': 'wake',            # Awake
-            '3': 'deep',            # Deep
-            '4': 'rem',             # REM
-            '5': 'light',           # Core (equivalent to Fitbit's light)
-            
-            # Apple Watch sleep stages (string values)
-            'HKCategoryValueSleepAnalysisInBed': 'restless',
-            'HKCategoryValueSleepAnalysisAsleepUnspecified': 'light',
-            'HKCategoryValueSleepAnalysisAsleepCore': 'light',
-            'HKCategoryValueSleepAnalysisAsleepDeep': 'deep',
-            'HKCategoryValueSleepAnalysisAsleepREM': 'rem',
-            'HKCategoryValueSleepAnalysisAwake': 'wake'
+            # Mapped from the standardized stages in extractor
+            'in_bed': 'restless',
+            'asleep': 'light',
+            'awake': 'wake',
+            'deep': 'deep',
+            'rem': 'rem',
+            'core': 'light',
+            'unknown': 'light'
         }
         
-        # Map sleep stages using enhanced mapping
-        if 'value' in sleep_df.columns:
-            sleep_df['level'] = sleep_df['value'].astype(str).map(
-                lambda x: apple_to_fitbit_stage.get(x, 'light')  # Default to light if unknown
+        # Map sleep stages
+        if 'sleep_stage' in sleep_df.columns:
+            sleep_df['level'] = sleep_df['sleep_stage'].map(
+                lambda x: apple_to_fitbit_stage.get(x, 'light')
             )
-        elif 'sleep_stage' in sleep_df.columns:
-            # The iOS app may have already converted to sleep_stage
-            sleep_df['level'] = sleep_df['sleep_stage'].map({
-                'in_bed': 'restless',
-                'asleep': 'light',
-                'awake': 'wake',
-                'deep': 'deep',
-                'rem': 'rem',
-                'core': 'light',
-                'unknown': 'light'
-            })
+        elif 'value' in sleep_df.columns:
+            # Fallback direct mapping from HealthKit values
+            direct_stage_map = {
+                # Numeric values
+                '0': 'restless',
+                '1': 'light',
+                '2': 'wake',
+                '3': 'deep',
+                '4': 'rem',
+                '5': 'light',
+                
+                # String values
+                'HKCategoryValueSleepAnalysisInBed': 'restless',
+                'HKCategoryValueSleepAnalysisAsleepUnspecified': 'light',
+                'HKCategoryValueSleepAnalysisAsleepCore': 'light',
+                'HKCategoryValueSleepAnalysisAsleepDeep': 'deep',
+                'HKCategoryValueSleepAnalysisAsleepREM': 'rem',
+                'HKCategoryValueSleepAnalysisAwake': 'wake'
+            }
+            sleep_df['level'] = sleep_df['value'].astype(str).map(
+                lambda x: direct_stage_map.get(x, 'light')
+            )
         else:
             logger.warning("No sleep stage information found in sleep data")
             sleep_df['level'] = 'light'  # Default value
         
-        # Handle sleep sessions that span midnight
-        # Group by session ID if available, otherwise try to identify sessions by timestamp proximity
-        if 'sessionID' in sleep_df.columns:
-            logger.info("Using sessionID from iOS app for sleep session identification")
-            sleep_df['session_id'] = sleep_df['sessionID']
-        else:
+        # Ensure we have session IDs
+        if 'sessionID' not in sleep_df.columns:
             # Sort by start time
             sleep_df = sleep_df.sort_values('startDate')
             
             # Identify sleep sessions (gap of more than 30 minutes indicates a new session)
             sleep_df['time_diff'] = sleep_df['startDate'].diff().dt.total_seconds() / 60
             sleep_df['new_session'] = (sleep_df['time_diff'] > 30) | (sleep_df['time_diff'].isna())
-            sleep_df['session_id'] = sleep_df['new_session'].cumsum()
-            logger.info("Generated session IDs based on time proximity for sleep data")
+            sleep_df['sessionID'] = sleep_df['new_session'].cumsum()
+            logger.info("Generated session IDs based on time proximity in mapper")
         
         # Create daily summary with accurate session information
         daily_sleep = []
         
-        # Process each date separately
-        for sleep_date, date_group in sleep_df.groupby('sleep_date'):
-            # Find all sessions for this date
-            for session_id, session_data in date_group.groupby('session_id'):
-                # Calculate session metrics
-                session_start = session_data['startDate'].min()
-                session_end = session_data['endDate'].max()
+        # Group by sleep date and session ID
+        for (sleep_date, session_id), session_data in sleep_df.groupby(['sleep_date', 'sessionID']):
+            # Calculate session metrics
+            session_start = session_data['startDate'].min()
+            session_end = session_data['endDate'].max()
+            
+            # Total time in bed equals the sum of all segment durations in this session
+            in_bed_time = session_data['duration_minutes'].sum()
+            
+            # Calculate time spent in each sleep stage
+            asleep_time = session_data[session_data['level'].isin(['light', 'deep', 'rem'])]['duration_minutes'].sum()
+            deep_time = session_data[session_data['level'] == 'deep']['duration_minutes'].sum()
+            light_time = session_data[session_data['level'] == 'light']['duration_minutes'].sum()
+            rem_time = session_data[session_data['level'] == 'rem']['duration_minutes'].sum()
+            awake_time = session_data[session_data['level'] == 'wake']['duration_minutes'].sum()
+            restless_time = session_data[session_data['level'] == 'restless']['duration_minutes'].sum()
+            
+            # Calculate time after wakeup
+            # In Fitbit format, this is typically the time spent awake at the end of a sleep session
+            after_wakeup_time = 0
+            
+            # Sort segments by start time
+            sorted_segments = session_data.sort_values('startDate')
+            
+            # Find wake segments at the end of the session
+            if not sorted_segments.empty and 'wake' in sorted_segments['level'].values:
+                # Identify continuous wake segments at the end
+                reversed_segments = sorted_segments.iloc[::-1]  # Reverse to start from the end
+                continuous_wake = 0
+                for _, row in reversed_segments.iterrows():
+                    if row['level'] == 'wake':
+                        continuous_wake += row['duration_minutes']
+                    else:
+                        break  # Stop once we hit a non-wake segment
                 
-                # Calculate time in each sleep stage for this session
-                in_bed_time = session_data['duration_minutes'].sum()
-                
-                # Calculate time in each sleep stage
-                asleep_time = session_data[session_data['level'].isin(['light', 'deep', 'rem'])]['duration_minutes'].sum()
-                deep_time = session_data[session_data['level'] == 'deep']['duration_minutes'].sum()
-                light_time = session_data[session_data['level'] == 'light']['duration_minutes'].sum()
-                rem_time = session_data[session_data['level'] == 'rem']['duration_minutes'].sum()
-                awake_time = session_data[session_data['level'] == 'wake']['duration_minutes'].sum()
-                restless_time = session_data[session_data['level'] == 'restless']['duration_minutes'].sum()
-                
-                # Calculate time after wakeup (more accurate estimation)
-                after_wakeup_time = 0
-                if 'wake' in session_data['level'].values:
-                    # Get wake segments
-                    wake_segments = session_data[session_data['level'] == 'wake'].sort_values('startDate')
-                    # If last segment is wake and it's at the end of the session, use it as after_wakeup
-                    if not wake_segments.empty and wake_segments.iloc[-1]['startDate'] > session_start + pd.Timedelta(hours=4):
-                        after_wakeup_time = wake_segments.iloc[-1]['duration_minutes']
-                
-                # Create daily summary record for this session
-                daily_sleep.append({
-                    'person_id': person_id,
-                    'sleep_date': str(sleep_date),
-                    'is_main_sleep': 1,  # Assume main sleep for now
-                    'minute_in_bed': int(in_bed_time),
-                    'minute_asleep': int(asleep_time),
-                    'minute_after_wakeup': int(after_wakeup_time),
-                    'minute_awake': int(awake_time),
-                    'minute_restless': int(restless_time),
-                    'minute_deep': int(deep_time),
-                    'minute_light': int(light_time),
-                    'minute_rem': int(rem_time),
-                    'minute_wake': int(awake_time)
-                })
+                after_wakeup_time = continuous_wake
+            
+            # Determine if this is the main sleep for the day
+            # Typically the longest sleep session is considered main sleep
+            is_main_sleep = 1  # We'll update this later after checking all sessions for the day
+            
+            # Create daily summary record for this session
+            daily_sleep.append({
+                'person_id': person_id,
+                'sleep_date': str(sleep_date),
+                'is_main_sleep': is_main_sleep,
+                'minute_in_bed': int(in_bed_time),
+                'minute_asleep': int(asleep_time),
+                'minute_after_wakeup': int(after_wakeup_time),
+                'minute_awake': int(awake_time),
+                'minute_restless': int(restless_time),
+                'minute_deep': int(deep_time),
+                'minute_light': int(light_time),
+                'minute_rem': int(rem_time),
+                'minute_wake': int(awake_time),
+                'start_time': session_start,
+                'end_time': session_end,
+                'session_id': session_id
+            })
+        
+        # Convert to DataFrame
+        daily_sleep_df = pd.DataFrame(daily_sleep)
+        
+        if not daily_sleep_df.empty:
+            # Mark the longest sleep session for each day as the main sleep
+            for sleep_date, day_group in daily_sleep_df.groupby('sleep_date'):
+                if len(day_group) > 1:
+                    # Find the longest session (by minute_in_bed)
+                    main_sleep_idx = day_group['minute_in_bed'].idxmax()
+                    # Update is_main_sleep
+                    daily_sleep_df.loc[daily_sleep_df.index != main_sleep_idx, 'is_main_sleep'] = 0
+            
+            # Remove temporary columns
+            daily_sleep_df = daily_sleep_df.drop(['start_time', 'end_time', 'session_id'], axis=1, errors='ignore')
         
         # Create sleep level dataframe with precise timestamps and durations
         sleep_levels = []
         
         for _, row in sleep_df.iterrows():
+            session_id = row['sessionID']
+            sleep_date = row['sleep_date']
+            
+            # Get the is_main_sleep value for this session
+            is_main_sleep = 1  # Default
+            if not daily_sleep_df.empty:
+                # Find the corresponding session in daily_sleep
+                session_entries = daily_sleep_df[
+                    (daily_sleep_df['sleep_date'] == str(sleep_date)) &
+                    (daily_sleep_df['session_id'] == session_id)
+                ]
+                if not session_entries.empty:
+                    is_main_sleep = session_entries.iloc[0]['is_main_sleep']
+            
             # Calculate seconds from start of day for better sorting
             seconds_from_start_of_day = (row['startDate'] - 
                                          pd.Timestamp.combine(row['sleep_date'], pd.Timestamp.min.time())).total_seconds()
             
             sleep_levels.append({
                 'person_id': person_id,
-                'sleep_date': str(row['sleep_date']),
-                'is_main_sleep': 1,  # Assume main sleep for now
+                'sleep_date': str(sleep_date),
+                'is_main_sleep': is_main_sleep,
                 'level': row['level'],
                 'date': row['startDate'].strftime('%Y-%m-%d %H:%M:%S'),
                 'duration_in_min': int(row['duration_minutes']),
                 'seconds_from_start_of_day': int(seconds_from_start_of_day)
             })
         
-        sleep_daily_summary_df = pd.DataFrame(daily_sleep)
+        sleep_daily_summary_df = daily_sleep_df
         sleep_level_df = pd.DataFrame(sleep_levels)
         
         logger.info(f"Converted {len(sleep_df)} sleep records into {len(sleep_daily_summary_df)} daily summaries and {len(sleep_level_df)} sleep level entries")

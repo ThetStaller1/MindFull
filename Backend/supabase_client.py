@@ -161,14 +161,33 @@ class SupabaseClient:
     
     def store_health_data(self, health_data: Dict[str, Any], user_id: str) -> bool:
         """
-        Store health data from HealthKit to Supabase tables.
+        Store health data from HealthKit into Supabase
+        
+        This method processes and stores various types of health data collected from Apple HealthKit
+        into corresponding Fitbit-format tables in Supabase.
+        
+        Sleep Data Processing:
+        ---------------------
+        The sleep data processing follows these steps:
+        1. Group sleep records by date and session (gaps > 30 min indicate new sessions)
+        2. Sort and process records chronologically to handle overlaps
+        3. Calculate accurate durations for each sleep segment
+        4. Map HealthKit sleep stages to Fitbit formats (wake, light, deep, rem, restless)
+        5. Create session-based summaries with accurate sleep stage minutes
+        
+        Fitbit Sleep Stage Equivalents:
+        - wake: Periods when the user was awake during sleep
+        - light: Light sleep (includes Core/Light from Apple Watch)
+        - deep: Deep sleep stage
+        - rem: REM (rapid eye movement) sleep stage
+        - restless: In bed but not fully asleep
         
         Args:
-            health_data: Dictionary with HealthKit data arrays for each type
-            user_id: The user ID to store data for
+            health_data: Dictionary containing HealthKit data (heart rate, steps, sleep, etc.)
+            user_id: Supabase user ID to associate with the data
             
         Returns:
-            Boolean indicating success
+            bool: True if all data was stored successfully, False otherwise
         """
         try:
             logger.info(f"Storing HealthKit data for user {user_id}")
@@ -397,125 +416,193 @@ class SupabaseClient:
                 sleep_records = []
                 sleep_level_records = []
                 
-                # Group sleep data by day
-                sleep_by_day = {}
+                # Group sleep data by day and session
+                sleep_sessions = {}
                 
-                for record in health_data['sleep']:
-                    # Extract date and add to group
-                    start_date = record.get('startDate', '')
-                    if 'T' in start_date:
-                        date_str = start_date.split('T')[0]
+                # First pass: Sort records by start time and group by day
+                sorted_sleep_records = sorted(health_data['sleep'], key=lambda r: r.get('startDate', ''))
+                
+                # Pre-process records to extract dates and handle session creation
+                for record in sorted_sleep_records:
+                    # Extract date for grouping
+                    start_date_str = record.get('startDate', '')
+                    if 'T' in start_date_str:
+                        date_str = start_date_str.split('T')[0]
                     else:
                         date_str = datetime.now().strftime('%Y-%m-%d')
                     
-                    # Add record to date group
-                    if date_str in sleep_by_day:
-                        sleep_by_day[date_str].append(record)
-                    else:
-                        sleep_by_day[date_str] = [record]
+                    # Add date to record for easier access later
+                    record['sleep_date'] = date_str
+                    
+                    # Create date key if it doesn't exist
+                    if date_str not in sleep_sessions:
+                        sleep_sessions[date_str] = []
+                        
+                    # Add record to the day's collection
+                    sleep_sessions[date_str].append(record)
+                
+                # Session tracking to generate consistent IDs
+                current_session_id = None
+                last_end_time = None
                 
                 # Process each day's sleep data
-                for date_str, day_records in sleep_by_day.items():
-                    # Calculate summary values for the day
-                    minute_in_bed = 0
-                    minute_asleep = 0
-                    minute_awake = 0
-                    minute_restless = 0
-                    minute_deep = 0
-                    minute_light = 0
-                    minute_rem = 0
-                    minute_wake = 0
+                for date_str, day_records in sleep_sessions.items():
+                    # Sort records chronologically to ensure proper session detection
+                    day_records.sort(key=lambda r: r.get('startDate', ''))
                     
-                    for idx, record in enumerate(day_records):
-                        # Extract sleep stage
-                        sleep_stage = record.get('value', 'unknown')
-                        
-                        # Generate a unique sleep ID for each sleep session
-                        if idx == 0 or record.get('startDate', '').split('T')[0] != day_records[idx-1].get('startDate', '').split('T')[0]:
-                            # This is a new sleep session on this day
-                            timestamp = record.get('timestamp', time.time())
-                            sleep_id = f"sleep_{timestamp}"
-                        else:
-                            # Continue with the same sleep session
-                            timestamp = day_records[idx-1].get('timestamp', time.time())
-                            sleep_id = f"sleep_{timestamp}"
-                        
-                        # Extract start/end times
+                    # Group records into sessions
+                    current_records = []
+                    session_records = []
+                    
+                    for i, record in enumerate(day_records):
                         start_time_str = record.get('startDate', '')
                         end_time_str = record.get('endDate', start_time_str)
                         
-                        # Calculate or extract duration in minutes
-                        duration = 0
-                        if 'duration' in record:
-                            # Use explicit duration field
-                            try:
-                                duration = float(record['duration'])
-                                logger.info(f"Using explicit duration field for sleep record: {duration} minutes")
-                            except (ValueError, TypeError):
-                                logger.warning(f"Invalid duration value: {record.get('duration')}")
-                        
-                        if duration == 0 and start_time_str and end_time_str and start_time_str != end_time_str:
-                            # Calculate from time difference
-                            try:
-                                start_time = dateutil.parser.parse(start_time_str)
-                                end_time = dateutil.parser.parse(end_time_str)
-                                duration = (end_time - start_time).total_seconds() / 60
-                                logger.info(f"Calculated duration from timestamps: {duration} minutes")
-                            except Exception as e:
-                                logger.warning(f"Error calculating sleep duration: {e}")
-                        
-                        # Create sleep level record
-                        sleep_level = {
-                            'person_id': user_id,
-                            'sleep_id': sleep_id,
-                            'sleep_date': date_str,
-                            'is_main_sleep': True,
-                            'level': self._map_sleep_stage(sleep_stage),
-                            'start_time': start_time_str,
-                            'end_time': end_time_str,
-                            'duration': int(duration)
-                        }
-                        
-                        sleep_level_records.append(sleep_level)
-                        
-                        # Update summary values based on sleep stage
-                        level = self._map_sleep_stage(sleep_stage)
-                        
-                        minute_in_bed += duration
-                        
-                        if level in ['light', 'deep', 'rem']:
-                            minute_asleep += duration
+                        try:
+                            # Parse start and end times
+                            start_time = dateutil.parser.parse(start_time_str)
+                            end_time = dateutil.parser.parse(end_time_str)
                             
-                        if level == 'wake':
-                            minute_wake += duration
-                            minute_awake += duration
-                        elif level == 'restless':
-                            minute_restless += duration
-                        elif level == 'deep':
-                            minute_deep += duration
-                        elif level == 'light':
-                            minute_light += duration
-                        elif level == 'rem':
-                            minute_rem += duration
+                            # Check if this is a new session (first record or gap > 30 min)
+                            if i == 0 or last_end_time is None or (start_time - last_end_time).total_seconds() > 1800:
+                                # Finalize previous session if it exists
+                                if current_records:
+                                    session_records.append(current_records)
+                                    
+                                # Start a new session
+                                current_records = [record]
+                                # Generate session ID using the timestamp of the first record in the session
+                                current_session_id = f"sleep_{int(start_time.timestamp())}"
+                            else:
+                                # Continue current session
+                                current_records.append(record)
+                            
+                            # Update last end time for gap detection
+                            last_end_time = end_time
+                            
+                        except Exception as e:
+                            logger.warning(f"Error processing sleep record timestamp: {e}")
+                            # Handle records with invalid timestamps
+                            if current_records:
+                                # Add to current session if one exists
+                                current_records.append(record)
+                            else:
+                                # Create a new session with a fallback ID
+                                current_records = [record]
+                                current_session_id = f"sleep_{time.time()}"
                     
-                    # Create sleep summary for the day
-                    summary = {
-                        'person_id': user_id,
-                        'sleep_date': date_str,
-                        'is_main_sleep': True,
-                        'minute_in_bed': int(minute_in_bed),
-                        'minute_asleep': int(minute_asleep),
-                        'minute_after_wakeup': 0, # No direct mapping from HealthKit
-                        'minute_awake': int(minute_awake),
-                        'minute_restless': int(minute_restless),
-                        'minute_deep': int(minute_deep),
-                        'minute_light': int(minute_light),
-                        'minute_rem': int(minute_rem),
-                        'minute_wake': int(minute_wake)
-                    }
+                    # Add the last session if not empty
+                    if current_records:
+                        session_records.append(current_records)
                     
-                    sleep_records.append(summary)
+                    # Process each session
+                    for session in session_records:
+                        # Calculate summary values for this session
+                        minute_in_bed = 0
+                        minute_asleep = 0
+                        minute_awake = 0
+                        minute_restless = 0
+                        minute_deep = 0
+                        minute_light = 0
+                        minute_rem = 0
+                        minute_wake = 0
+                        
+                        # Generate session ID from first record's start time
+                        first_record = session[0]
+                        try:
+                            start_time = dateutil.parser.parse(first_record.get('startDate', ''))
+                            session_id = f"sleep_{int(start_time.timestamp())}"
+                        except Exception:
+                            # Fallback to current time if parsing fails
+                            session_id = f"sleep_{int(time.time())}"
+                        
+                        # Process each record in the session
+                        for record in session:
+                            # Extract sleep stage
+                            sleep_stage = record.get('value', 'unknown')
+                            
+                            # Extract or calculate duration
+                            duration = 0
+                            start_time_str = record.get('startDate', '')
+                            end_time_str = record.get('endDate', start_time_str)
+                            
+                            if 'duration' in record:
+                                # Use explicit duration field if available
+                                try:
+                                    duration = float(record['duration'])
+                                except (ValueError, TypeError):
+                                    duration = 0
+                            
+                            # Calculate duration from timestamps if needed
+                            if duration == 0 and start_time_str and end_time_str and start_time_str != end_time_str:
+                                try:
+                                    start_time = dateutil.parser.parse(start_time_str)
+                                    end_time = dateutil.parser.parse(end_time_str)
+                                    duration = (end_time - start_time).total_seconds() / 60
+                                except Exception as e:
+                                    logger.warning(f"Error calculating sleep duration: {e}")
+                            
+                            # Only process if we have a valid duration
+                            if duration > 0:
+                                # Map sleep stage to standardized format
+                                level = self._map_sleep_stage(sleep_stage)
+                                
+                                # Create sleep level record
+                                sleep_level = {
+                                    'person_id': user_id,
+                                    'sleep_id': session_id,
+                                    'sleep_date': date_str,
+                                    'is_main_sleep': True,
+                                    'level': level,
+                                    'start_time': start_time_str,
+                                    'end_time': end_time_str,
+                                    'duration': int(duration)
+                                }
+                                
+                                sleep_level_records.append(sleep_level)
+                                
+                                # Update summary values based on sleep stage
+                                minute_in_bed += duration
+                                
+                                # According to Fitbit classification:
+                                # - light, deep, rem stages count as asleep time
+                                # - wake and restless count as awake time
+                                if level in ['light', 'deep', 'rem']:
+                                    minute_asleep += duration
+                                    
+                                if level == 'wake':
+                                    minute_wake += duration
+                                    minute_awake += duration
+                                elif level == 'restless':
+                                    minute_restless += duration
+                                elif level == 'deep':
+                                    minute_deep += duration
+                                elif level == 'light':
+                                    minute_light += duration
+                                elif level == 'rem':
+                                    minute_rem += duration
+                        
+                        # Only create a summary if we have valid data
+                        if minute_in_bed > 0:
+                            # Create sleep summary for the session
+                            summary = {
+                                'person_id': user_id,
+                                'sleep_date': date_str,
+                                'is_main_sleep': True,
+                                'minute_in_bed': int(minute_in_bed),
+                                'minute_asleep': int(minute_asleep),
+                                'minute_after_wakeup': 0,  # No direct mapping from HealthKit
+                                'minute_awake': int(minute_awake),
+                                'minute_restless': int(minute_restless),
+                                'minute_deep': int(minute_deep),
+                                'minute_light': int(minute_light),
+                                'minute_rem': int(minute_rem),
+                                'minute_wake': int(minute_wake)
+                            }
+                            
+                            sleep_records.append(summary)
                 
+                # Insert records in batches
                 if sleep_records:
                     try:
                         # Insert sleep daily summary records
@@ -533,21 +620,6 @@ class SupabaseClient:
                         # Insert sleep level records
                         for i in range(0, len(sleep_level_records), 10):
                             batch = sleep_level_records[i:i+10]
-                            
-                            # Include seconds_from_start_of_day if it exists (for better sorting)
-                            for record in batch:
-                                if 'seconds_from_start_of_day' not in record:
-                                    # Calculate from date field if missing
-                                    try:
-                                        time_str = record.get('date', '')
-                                        if time_str:
-                                            dt = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
-                                            midnight = datetime.combine(dt.date(), datetime.min.time())
-                                            seconds = int((dt - midnight).total_seconds())
-                                            record['seconds_from_start_of_day'] = seconds
-                                    except Exception as e:
-                                        logger.warning(f"Error calculating seconds_from_start_of_day: {e}")
-                            
                             self.service_client.table('fitbit_sleep_level').upsert(batch).execute()
                         
                         logger.info(f"Inserted {len(sleep_level_records)} sleep level records")
@@ -672,7 +744,22 @@ class SupabaseClient:
     # (user_id first, then health_data).
     
     def _map_sleep_stage(self, stage: str) -> str:
-        """Map HealthKit sleep stage values to Fitbit format"""
+        """
+        Map HealthKit sleep stage values to Fitbit format
+        
+        HealthKit and Fitbit use different classification systems for sleep stages.
+        This function standardizes the mapping to ensure consistent representation.
+        
+        Fitbit sleep stages:
+        - light: Light sleep (includes Core sleep from Apple Watch)
+        - deep: Deep sleep
+        - rem: REM sleep
+        - wake: Awake periods during sleep
+        - restless: In bed but not fully asleep (maps to HK 'InBed')
+        
+        Returns:
+            Standardized Fitbit sleep stage
+        """
         sleep_stage_mapping = {
             # Apple Watch sleep stages (numeric values)
             '0': 'restless',        # In Bed
@@ -866,15 +953,33 @@ class SupabaseClient:
     
     def get_health_data_for_analysis(self, user_id: str, days: int = 60, batch_size: int = 1000) -> Dict[str, Any]:
         """
-        Get health data for analysis from all health data tables for a user
+        Get health data from Supabase tables for analysis
+        
+        This method retrieves stored health data from Supabase, converts it back to HealthKit-compatible
+        format, and returns it in a structure suitable for the mental health analysis algorithm.
+        
+        For sleep data, the method:
+        1. Retrieves summary-level sleep data (daily totals)
+        2. Retrieves detailed sleep stage data ordered by start_time
+        3. Converts Fitbit-formatted sleep stages back to HealthKit format
+        4. Includes both summary and detailed sleep data for comprehensive analysis
         
         Args:
-            user_id: The user ID
-            days: Number of days of data to retrieve
-            batch_size: Number of records to fetch per batch (pagination size)
+            user_id: Supabase user ID to retrieve data for
+            days: Number of days of data to retrieve (default: 60)
+            batch_size: Number of records to retrieve in each batch (default: 1000)
             
         Returns:
-            Dictionary with all health data in a format compatible with the mental health model
+            Dictionary containing health data in HealthKit-compatible format, with keys:
+            - heartRate: Heart rate measurements
+            - steps: Step count data
+            - activeEnergy: Active energy data
+            - sleep: Sleep analysis data
+            - workout: Workout data
+            - distance: Distance data
+            - basalEnergy: Basal energy data
+            - flightsClimbed: Flights climbed data
+            - userInfo: User demographic information
         """
         try:
             logger.info(f"Getting health data for analysis from user {user_id}")
@@ -1134,30 +1239,67 @@ class SupabaseClient:
                 }
                 
                 while has_more:
-                    # Order by seconds_from_start_of_day to maintain chronological sequence
-                    level_result = self.service_client.table('fitbit_sleep_level') \
-                        .select('*') \
-                        .eq('person_id', user_id) \
-                        .gte('sleep_date', start_date_str) \
-                        .order('seconds_from_start_of_day', desc=False) \
-                        .range(offset, offset + batch_size - 1) \
-                        .execute()
+                    # Order by start_time instead of seconds_from_start_of_day
+                    try:
+                        level_result = self.service_client.table('fitbit_sleep_level') \
+                            .select('*') \
+                            .eq('person_id', user_id) \
+                            .gte('sleep_date', start_date_str) \
+                            .order('start_time', desc=False) \
+                            .range(offset, offset + batch_size - 1) \
+                            .execute()
+                    except Exception as e:
+                        # Fallback to ordering by sleep_date if start_time ordering fails
+                        logger.warning(f"Error ordering by start_time: {e}, falling back to sleep_date ordering")
+                        level_result = self.service_client.table('fitbit_sleep_level') \
+                            .select('*') \
+                            .eq('person_id', user_id) \
+                            .gte('sleep_date', start_date_str) \
+                            .order('sleep_date', desc=False) \
+                            .range(offset, offset + batch_size - 1) \
+                            .execute()
                         
                     if level_result.data:
                         for level_entry in level_result.data:
-                            # Get the sleep date and original timestamp
+                            # Get the sleep date
                             sleep_date_str = level_entry['sleep_date']
-                            time_str = level_entry.get('date', f"{sleep_date_str} 22:00:00")
                             
                             try:
-                                # Parse the start time
-                                start_dt = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
-                                iso_start = start_dt.isoformat() + 'Z'
+                                # Get start and end times
+                                start_time_str = level_entry.get('start_time')
+                                end_time_str = level_entry.get('end_time')
+                                duration = level_entry.get('duration', 0)
                                 
-                                # Calculate end time based on duration
-                                duration_min = level_entry.get('duration_in_min', 0)
-                                end_dt = start_dt + timedelta(minutes=duration_min)
-                                iso_end = end_dt.isoformat() + 'Z'
+                                # Ensure we have valid times
+                                if not start_time_str or not end_time_str:
+                                    # Fallback if times are missing
+                                    logger.warning("Missing start/end time for sleep level entry")
+                                    continue
+                                
+                                # Parse the times - handle different timestamp formats
+                                try:
+                                    # Try to parse with dateutil which handles many formats
+                                    start_dt = dateutil.parser.parse(start_time_str)
+                                    end_dt = dateutil.parser.parse(end_time_str)
+                                except Exception:
+                                    # Fallback if dateutil fails
+                                    try:
+                                        # Try ISO format (used in many databases)
+                                        start_dt = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                                        end_dt = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+                                    except Exception:
+                                        # Last resort fallback
+                                        logger.warning(f"Could not parse sleep timestamps: {start_time_str}, {end_time_str}")
+                                        continue
+                                
+                                # Ensure times are in ISO format with Z suffix
+                                iso_start = start_dt.isoformat().replace('+00:00', 'Z')
+                                if not iso_start.endswith('Z'):
+                                    iso_start = iso_start + 'Z'
+                                    
+                                iso_end = end_dt.isoformat().replace('+00:00', 'Z')
+                                if not iso_end.endswith('Z'):
+                                    iso_end = iso_end + 'Z'
                                 
                                 # Map Fitbit sleep level to HealthKit value
                                 level = level_entry.get('level', 'light')
@@ -1170,9 +1312,8 @@ class SupabaseClient:
                                     "endDate": iso_end,
                                     "value": hk_value,
                                     "sleep_stage": level,
-                                    "duration": duration_min,
-                                    "unit": "min",
-                                    "seconds_from_start_of_day": level_entry.get('seconds_from_start_of_day', 0)
+                                    "duration": duration,
+                                    "unit": "min"
                                 })
                             except Exception as e:
                                 logger.warning(f"Error processing sleep level entry: {e}")

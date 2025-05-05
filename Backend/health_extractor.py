@@ -454,9 +454,9 @@ class HealthKitExtractor:
             df['duration_minutes'] = df['duration']
             logger.info("Using explicit duration field from iOS app for sleep data")
         elif 'startDate' in df.columns and 'endDate' in df.columns:
-            # Fall back to calculating from time difference
+            # Calculate from time difference
             df['duration_minutes'] = (df['endDate'] - df['startDate']).dt.total_seconds() / 60
-            logger.info("Calculated sleep duration from timestamps (fallback method)")
+            logger.info("Calculated sleep duration from timestamps")
         
         # Extract sleep date (the date when sleep started)
         if 'startDate' in df.columns:
@@ -466,30 +466,40 @@ class HealthKitExtractor:
         if 'sessionID' in df.columns:
             logger.info("Found sleep session IDs in the data")
         else:
-            # If no session ID, we'll identify sessions in the mapper
-            logger.info("No sleep session IDs found, will identify sessions by time proximity in mapper")
+            # Sort by start time
+            df = df.sort_values('startDate')
+            
+            # Identify sleep sessions (gap of more than 30 minutes indicates a new session)
+            df['time_diff'] = df['startDate'].diff().dt.total_seconds() / 60
+            df['new_session'] = (df['time_diff'] > 30) | (df['time_diff'].isna())
+            df['sessionID'] = df['new_session'].cumsum()
+            logger.info("Generated session IDs based on time proximity for sleep data")
         
         # Convert sleep stage value if present
         if 'value' in df.columns:
             # Map HealthKit sleep stage values to standardized values
-            # For HKCategoryValueSleepAnalysis
             sleep_stage_map = {
-                '0': 'inBed',
-                '1': 'asleep',
+                # Numeric values
+                '0': 'in_bed',
+                '1': 'asleep',  # Unspecified
                 '2': 'awake',
                 '3': 'deep',
                 '4': 'rem',
-                '5': 'core'
+                '5': 'core',
+                
+                # String values directly from HealthKit
+                'HKCategoryValueSleepAnalysisInBed': 'in_bed',
+                'HKCategoryValueSleepAnalysisAsleepUnspecified': 'asleep',
+                'HKCategoryValueSleepAnalysisAsleepCore': 'core',
+                'HKCategoryValueSleepAnalysisAsleepDeep': 'deep',
+                'HKCategoryValueSleepAnalysisAsleepREM': 'rem',
+                'HKCategoryValueSleepAnalysisAwake': 'awake'
             }
             
             # Try to map the values or keep original if not in map
             df['sleep_stage'] = df['value'].astype(str).map(
-                lambda x: sleep_stage_map.get(x, x)
+                lambda x: sleep_stage_map.get(x, 'unknown')
             )
-        
-        # If sleep_stage field is directly available (from iOS app), use it
-        if 'sleep_stage' in df.columns:
-            logger.info("Sleep stage information available directly")
         
         return df
     

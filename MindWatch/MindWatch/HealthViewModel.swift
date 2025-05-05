@@ -29,7 +29,6 @@ class HealthViewModel: ObservableObject {
         HKQuantityType(.activeEnergyBurned),
         HKQuantityType(.basalEnergyBurned),
         HKQuantityType(.oxygenSaturation),
-        HKQuantityType(.respiratoryRate),
         HKCategoryType(.sleepAnalysis)
     ]
     
@@ -468,8 +467,6 @@ class HealthViewModel: ObservableObject {
             return .basalEnergy
         case HKQuantityTypeIdentifier.oxygenSaturation.rawValue:
             return .oxygenSaturation
-        case HKQuantityTypeIdentifier.respiratoryRate.rawValue:
-            return .respiratoryRate
         default:
             fatalError("Unexpected quantity type: \(quantityType.identifier)")
         }
@@ -497,9 +494,6 @@ class HealthViewModel: ObservableObject {
         case HKQuantityTypeIdentifier.oxygenSaturation.rawValue:
             return HKUnit.percent()
             
-        case HKQuantityTypeIdentifier.respiratoryRate.rawValue:
-            return HKUnit.count().unitDivided(by: HKUnit.minute())
-            
         default:
             return HKUnit.count()
         }
@@ -520,9 +514,6 @@ class HealthViewModel: ObservableObject {
             
         case HKQuantityTypeIdentifier.oxygenSaturation.rawValue:
             return "percent"
-            
-        case HKQuantityTypeIdentifier.respiratoryRate.rawValue:
-            return "breaths/min"
             
         default:
             return "unknown"
