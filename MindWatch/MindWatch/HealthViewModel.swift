@@ -114,7 +114,16 @@ class HealthViewModel: ObservableObject {
                 
                 if healthData.isEmpty {
                     DispatchQueue.main.async {
-                        self.errorMessage = "No new health data found to sync"
+                        self.uploadProgressMessage = "No new health data to sync. Fetching latest analysis..."
+                        self.uploadProgress = 0.7
+                    }
+                    
+                    // If no new data, fetch the latest analysis results
+                    try await fetchLatestAnalysisAsync()
+                    
+                    DispatchQueue.main.async {
+                        self.uploadProgress = 1.0
+                        self.uploadProgressMessage = "Analysis retrieved!"
                         self.isLoading = false
                     }
                     return
@@ -170,6 +179,14 @@ class HealthViewModel: ObservableObject {
                     // Update the last sync date to now
                     DispatchQueue.main.async {
                         self.lastSyncDate = Date()
+                        self.uploadProgress = 0.9
+                        self.uploadProgressMessage = "Data synced! Fetching latest analysis..."
+                    }
+                    
+                    // Fetch the latest analysis results after syncing
+                    try await fetchLatestAnalysisAsync()
+                    
+                    DispatchQueue.main.async {
                         self.uploadProgress = 1.0
                         self.uploadProgressMessage = "Sync complete!"
                         self.isLoading = false
@@ -181,7 +198,13 @@ class HealthViewModel: ObservableObject {
                 }
             } catch let error as APIError {
                 DispatchQueue.main.async {
-                    self.errorMessage = "Failed to sync health data. Error: \(error.description) (code: \(error.code))"
+                    // Check if it's a timeout error
+                    if case .serverError(let message) = error, message.contains("timed out") {
+                        // Create a user-friendly timeout message
+                        self.errorMessage = "The request took too long to complete. Your data is still being processed on the server. Please try again in a few minutes to check your results."
+                    } else {
+                        self.errorMessage = "Failed to sync health data. Error: \(error.description) (code: \(error.code))"
+                    }
                     self.isLoading = false
                 }
             } catch {
@@ -279,6 +302,17 @@ class HealthViewModel: ObservableObject {
                     self.analysisResult = analysis
                     self.isLoading = false
                 }
+            } catch let error as APIError {
+                DispatchQueue.main.async {
+                    // Check if it's a timeout error
+                    if case .serverError(let message) = error, message.contains("timed out") {
+                        // Create a user-friendly timeout message
+                        self.errorMessage = "The analysis request took too long to complete. Your analysis is still being processed on the server. Please try again in a few minutes to check your results."
+                    } else {
+                        self.errorMessage = "Failed to request analysis: \(error.description)"
+                    }
+                    self.isLoading = false
+                }
             } catch {
                 DispatchQueue.main.async {
                     self.errorMessage = "Failed to request analysis: \(error.localizedDescription)"
@@ -300,6 +334,17 @@ class HealthViewModel: ObservableObject {
                     self.analysisResult = analysis
                     self.isLoading = false
                 }
+            } catch let error as APIError {
+                DispatchQueue.main.async {
+                    // Check if it's a timeout error
+                    if case .serverError(let message) = error, message.contains("timed out") {
+                        // Create a user-friendly timeout message
+                        self.errorMessage = "The request took too long to complete. Please try again in a few minutes."
+                    } else {
+                        self.errorMessage = "Failed to fetch latest analysis: \(error.description)"
+                    }
+                    self.isLoading = false
+                }
             } catch {
                 DispatchQueue.main.async {
                     self.errorMessage = "Failed to fetch latest analysis: \(error.localizedDescription)"
@@ -318,15 +363,25 @@ class HealthViewModel: ObservableObject {
             if let quantityType = type as? HKQuantityType {
                 let healthData = try await fetchQuantityData(for: quantityType, from: startDate)
                 allHealthData.append(contentsOf: healthData)
+                print("DEBUG: Collected \(healthData.count) data points for \(quantityType.identifier)")
             } else if let categoryType = type as? HKCategoryType, categoryType.identifier == HKCategoryTypeIdentifier.sleepAnalysis.rawValue {
                 let sleepData = try await fetchSleepData(from: startDate)
                 allHealthData.append(contentsOf: sleepData)
+                print("DEBUG: Added \(sleepData.count) sleep data points to collection")
             }
         }
         
         // Also collect workout data
         let workoutData = try await fetchWorkoutData(from: startDate)
         allHealthData.append(contentsOf: workoutData)
+        print("DEBUG: Added \(workoutData.count) workout data points to collection")
+        
+        // Log summary of collected data
+        var typeCounts: [String: Int] = [:]
+        for point in allHealthData {
+            typeCounts[point.type.rawValue] = (typeCounts[point.type.rawValue] ?? 0) + 1
+        }
+        print("DEBUG: HEALTH DATA SUMMARY - Total: \(allHealthData.count) points - \(typeCounts)")
         
         return allHealthData
     }
@@ -375,6 +430,8 @@ class HealthViewModel: ObservableObject {
     
     // Fetch sleep data specifically
     private func fetchSleepData(from startDate: Date) async throws -> [HealthKitDataPoint] {
+        print("DEBUG: Starting to fetch sleep data from \(startDate)")
+        
         return try await withCheckedThrowingContinuation { continuation in
             let sleepType = HKCategoryType(.sleepAnalysis)
             let predicate = HKQuery.predicateForSamples(withStart: startDate, end: Date(), options: .strictStartDate)
@@ -385,14 +442,18 @@ class HealthViewModel: ObservableObject {
             let query = HKSampleQuery(sampleType: sleepType, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: [sortDescriptor]) { _, samples, error in
                 
                 if let error = error {
+                    print("DEBUG: Error fetching sleep data: \(error.localizedDescription)")
                     continuation.resume(throwing: error)
                     return
                 }
                 
-                guard let samples = samples else {
+                guard let samples = samples, !samples.isEmpty else {
+                    print("DEBUG: No sleep samples found")
                     continuation.resume(returning: [])
                     return
                 }
+                
+                print("DEBUG: Found \(samples.count) sleep samples")
                 
                 // Group samples into sleep sessions based on proximity in time
                 var sleepSessions: [[HKCategorySample]] = []
@@ -401,6 +462,8 @@ class HealthViewModel: ObservableObject {
                 
                 // First, sort samples by start date to ensure proper sequencing
                 let sortedSamples = samples.compactMap { $0 as? HKCategorySample }.sorted { $0.startDate < $1.startDate }
+                
+                print("DEBUG: Processed \(sortedSamples.count) category samples")
                 
                 // Group samples into sessions (sleep entries within 30 minutes of each other are considered the same session)
                 for sample in sortedSamples {
@@ -421,6 +484,8 @@ class HealthViewModel: ObservableObject {
                     sleepSessions.append(currentSession)
                 }
                 
+                print("DEBUG: Identified \(sleepSessions.count) sleep sessions")
+                
                 // Process each session and create HealthKitDataPoint objects
                 var sleepData: [HealthKitDataPoint] = []
                 
@@ -428,6 +493,8 @@ class HealthViewModel: ObservableObject {
                     // Create a unique session ID based on the first entry's start time
                     let sessionStartTime = session.first!.startDate
                     let sessionID = "sleep_session_\(sessionIndex)_\(Int(sessionStartTime.timeIntervalSince1970))"
+                    
+                    print("DEBUG: Processing sleep session \(sessionIndex) with \(session.count) entries")
                     
                     for categorySample in session {
                         // Duration in minutes
@@ -448,10 +515,13 @@ class HealthViewModel: ObservableObject {
                             sessionID: sessionID
                         )
                         
+                        print("DEBUG: Sleep entry - Stage: \(sleepStage.rawValue), Duration: \(durationMinutes) minutes")
+                        
                         sleepData.append(dataPoint)
                     }
                 }
                 
+                print("DEBUG: Created \(sleepData.count) sleep data points")
                 continuation.resume(returning: sleepData)
             }
             
@@ -651,5 +721,32 @@ class HealthViewModel: ObservableObject {
         - Flights Climbed: \(flightsClimbed)
         - Other: \(other)
         """
+    }
+    
+    // Helper function to fetch the latest analysis asynchronously
+    private func fetchLatestAnalysisAsync() async throws {
+        do {
+            let analysis = try await apiService.getLatestAnalysis()
+            
+            // Use Task with MainActor to safely update the property
+            await MainActor.run {
+                self.analysisResult = analysis
+            }
+        } catch let error as APIError {
+            // If it's a timeout error, add some context for this specific case
+            if case .serverError(let message) = error, message.contains("timed out") {
+                await MainActor.run {
+                    self.errorMessage = "The analysis request took too long to complete. Please check your results later."
+                }
+                throw error  // Simply re-throw the original error instead of .timeoutError
+            } else {
+                throw error
+            }
+        }
+    }
+    
+    // Combined function for Analysis tab to sync data and show analysis
+    func syncAndShowAnalysis() {
+        syncHealthData()
     }
 } 

@@ -1110,19 +1110,32 @@ async def get_latest_analysis(
                 "message": "No analysis results found for this user"
             }
         
-        # Ensure all required fields are present for the iOS app
-        required_fields = ["risk_score", "risk_level", "analysis_date", "contributing_factors"]
-        for field in required_fields:
-            if field not in latest_analysis:
-                logger.warning(f"Missing required field '{field}' in analysis result")
-                if field == "contributing_factors":
-                    latest_analysis[field] = {}
-                elif field == "risk_score":
-                    latest_analysis[field] = 0.0
-                elif field == "risk_level":
-                    latest_analysis[field] = "UNKNOWN"
-                elif field == "analysis_date":
-                    latest_analysis[field] = datetime.now().isoformat()
+        # Ensure all required fields are present for the iOS app in the camelCase format
+        required_fields_mapping = {
+            "riskScore": "risk_score",
+            "riskLevel": "risk_level", 
+            "analysisDate": "analysis_date", 
+            "contributingFactors": "contributing_factors"
+        }
+        
+        for camel_field, snake_field in required_fields_mapping.items():
+            if camel_field not in latest_analysis:
+                logger.warning(f"Missing required field '{camel_field}' in analysis result")
+                if camel_field == "contributingFactors":
+                    latest_analysis[camel_field] = {}
+                elif camel_field == "riskScore":
+                    latest_analysis[camel_field] = 0.0
+                elif camel_field == "riskLevel":
+                    latest_analysis[camel_field] = "UNKNOWN"
+                elif camel_field == "analysisDate":
+                    latest_analysis[camel_field] = datetime.now().isoformat()
+            
+            # Ensure AnalysisResult snake_case fields are also present for response_model validation
+            latest_analysis[snake_field] = latest_analysis.get(camel_field, 
+                                                              {} if camel_field == "contributingFactors" else 
+                                                              0.0 if camel_field == "riskScore" else
+                                                              "UNKNOWN" if camel_field == "riskLevel" else
+                                                              datetime.now().isoformat())
         
         # Ensure the user_id is consistent with the requested user
         latest_analysis["user_id"] = user_id

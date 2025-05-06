@@ -54,19 +54,25 @@ struct HealthDataView: View {
                                 .foregroundColor(.secondary)
                         }
                         
-                        Button(action: {
-                            collectAndUploadData()
-                        }) {
-                            Text(healthViewModel.lastSyncDate == nil ? "Sync Health Data" : "Refresh Health Data")
-                                .fontWeight(.bold)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(Color.accentColor)
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
+                        VStack(spacing: 8) {
+                            Text("Go to the Analysis tab to sync your health data")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                            
+                            Button(action: {
+                                isShowingHealthData.toggle()
+                            }) {
+                                Text(isShowingHealthData ? "Hide Data Summary" : "View Data Summary")
+                                    .fontWeight(.medium)
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(Color.accentColor.opacity(0.2))
+                                    .foregroundColor(.accentColor)
+                                    .cornerRadius(8)
+                            }
                         }
                         .padding(.top, 8)
-                        .disabled(healthViewModel.isLoading)
                         
                         if healthViewModel.isLoading {
                             VStack(spacing: 8) {
@@ -197,11 +203,6 @@ struct HealthDataView: View {
         .padding()
         .background(Color(.systemGray6))
         .cornerRadius(12)
-    }
-    
-    private func collectAndUploadData() {
-        // Use the syncHealthData method directly
-        healthViewModel.syncHealthData()
     }
     
     private func formatDate(_ date: Date) -> String {

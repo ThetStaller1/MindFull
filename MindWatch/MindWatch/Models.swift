@@ -127,7 +127,7 @@ struct AnalysisResult: Identifiable, Codable {
     let prediction: Int
     let riskLevel: String
     let riskScore: Double
-    let contributingFactors: [String: Double]
+    let contributingFactors: ContributingFactors
     let analysisDate: String
     
     // Additional fields from the backend that might be present
@@ -137,6 +137,17 @@ struct AnalysisResult: Identifiable, Codable {
         let qualityScore: Int
         let dataTypes: [String: Bool]
         let message: String
+    }
+    
+    struct ContributingFactors: Codable {
+        let feature_importance: [String: Double]?
+        let data_quality: DataQualityInfo?
+        let dataQuality: DataQuality?
+        
+        struct DataQualityInfo: Codable {
+            let score: Int?
+            let message: String?
+        }
     }
     
     // Add CodingKeys to handle missing fields
@@ -152,7 +163,15 @@ struct AnalysisResult: Identifiable, Codable {
         prediction = try container.decode(Int.self, forKey: .prediction)
         riskLevel = try container.decode(String.self, forKey: .riskLevel)
         riskScore = try container.decode(Double.self, forKey: .riskScore)
-        contributingFactors = try container.decode([String: Double].self, forKey: .contributingFactors)
+        
+        // Try to decode contributingFactors as the structured type
+        do {
+            contributingFactors = try container.decode(ContributingFactors.self, forKey: .contributingFactors)
+        } catch {
+            // Fall back to empty container if decoding fails
+            contributingFactors = ContributingFactors(feature_importance: [:], data_quality: nil, dataQuality: nil)
+        }
+        
         analysisDate = try container.decode(String.self, forKey: .analysisDate)
         dataQuality = try? container.decode(DataQuality.self, forKey: .dataQuality)
     }

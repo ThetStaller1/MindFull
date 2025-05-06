@@ -6,14 +6,19 @@ struct MainTabView: View {
     
     var body: some View {
         TabView {
+            AnalysisView()
+                .tabItem {
+                    Label("Analysis", systemImage: "brain.head.profile")
+                }
+            
             HealthDataView()
                 .tabItem {
                     Label("Health Data", systemImage: "heart.fill")
                 }
             
-            AnalysisView()
+            EducationView()
                 .tabItem {
-                    Label("Analysis", systemImage: "brain.head.profile")
+                    Label("Education", systemImage: "book.fill")
                 }
             
             ProfileView()

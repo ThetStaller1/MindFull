@@ -36,7 +36,7 @@ struct AnalysisView: View {
                         Button(action: {
                             requestAnalysis()
                         }) {
-                            Text(healthViewModel.analysisResult == nil ? "Run Analysis" : "Refresh Analysis")
+                            Text(healthViewModel.analysisResult == nil ? "Sync Health Data" : "Update Health Data & Analysis")
                                 .fontWeight(.bold)
                                 .frame(maxWidth: .infinity)
                                 .padding()
@@ -48,7 +48,7 @@ struct AnalysisView: View {
                         .disabled(isRequestingAnalysis)
                         
                         if isRequestingAnalysis {
-                            ProgressView("Analyzing data...")
+                            ProgressView("Processing health data...")
                                 .padding(.top, 8)
                         }
                         
@@ -57,6 +57,33 @@ struct AnalysisView: View {
                                 .foregroundColor(.red)
                                 .font(.caption)
                                 .padding(.vertical, 8)
+                        }
+                        
+                        // Show upload progress when syncing
+                        if healthViewModel.isLoading && healthViewModel.uploadProgress > 0 {
+                            VStack(spacing: 4) {
+                                // Progress bar
+                                GeometryReader { geometry in
+                                    ZStack(alignment: .leading) {
+                                        Rectangle()
+                                            .frame(width: geometry.size.width, height: 8)
+                                            .opacity(0.3)
+                                            .foregroundColor(.gray)
+                                        
+                                        Rectangle()
+                                            .frame(width: CGFloat(healthViewModel.uploadProgress) * geometry.size.width, height: 8)
+                                            .foregroundColor(.blue)
+                                    }
+                                    .cornerRadius(4)
+                                }
+                                .frame(height: 8)
+                                
+                                // Progress message
+                                Text(healthViewModel.uploadProgressMessage)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 8)
                         }
                     }
                     .padding()
@@ -68,8 +95,8 @@ struct AnalysisView: View {
                         analysisResultCard(result: result)
                         
                         // Contributing factors
-                        if !result.contributingFactors.isEmpty {
-                            contributingFactorsCard(factors: result.contributingFactors)
+                        if let featureImportance = result.contributingFactors.feature_importance, !featureImportance.isEmpty {
+                            contributingFactorsCard(factors: featureImportance)
                         }
                         
                         // Disclaimer
@@ -191,7 +218,7 @@ struct AnalysisView: View {
         
         Task {
             await MainActor.run {
-                healthViewModel.requestAnalysis()
+                healthViewModel.syncAndShowAnalysis()
                 isRequestingAnalysis = false
             }
         }
