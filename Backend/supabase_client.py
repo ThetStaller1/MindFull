@@ -357,11 +357,17 @@ class SupabaseClient:
                         logger.error(f"Error inserting step records: {e}", exc_info=True)
                         success = False
             
-            # Process active energy data for activity tracking
-            if 'activeEnergy' in health_data and health_data['activeEnergy']:
+            # Process activity data - Accept data from either 'activity' (new) or 'activeEnergy' (old) key
+            activity_data = []
+            if 'activity' in health_data and health_data['activity']:
+                activity_data = health_data['activity']
+            elif 'activeEnergy' in health_data and health_data['activeEnergy']:
+                activity_data = health_data['activeEnergy']
+                
+            if activity_data:
                 activity_records = []
                 
-                for record in health_data['activeEnergy']:
+                for record in activity_data:
                     try:
                         # Extract date from ISO format
                         start_date = record.get('startDate', '')
@@ -397,7 +403,7 @@ class SupabaseClient:
                         
                         activity_records.append(activity_record)
                     except Exception as e:
-                        logger.warning(f"Error processing active energy record: {e}")
+                        logger.warning(f"Error processing activity record: {e}")
                 
                 if activity_records:
                     try:
@@ -617,12 +623,20 @@ class SupabaseClient:
                 
                 if sleep_level_records:
                     try:
+                        # Filter out records with duration of 0 as they cause analysis issues
+                        # This is a final safety check to ensure no zero-duration records are uploaded to Supabase
+                        # There is some filtering in health_extractor.py but this ensures all paths are covered
+                        filtered_sleep_level_records = [record for record in sleep_level_records if record.get('duration', 0) > 0]
+                        
+                        if len(filtered_sleep_level_records) < len(sleep_level_records):
+                            logger.warning(f"Filtered out {len(sleep_level_records) - len(filtered_sleep_level_records)} sleep level records with duration of 0")
+                        
                         # Insert sleep level records
-                        for i in range(0, len(sleep_level_records), 10):
-                            batch = sleep_level_records[i:i+10]
+                        for i in range(0, len(filtered_sleep_level_records), 10):
+                            batch = filtered_sleep_level_records[i:i+10]
                             self.service_client.table('fitbit_sleep_level').upsert(batch).execute()
                         
-                        logger.info(f"Inserted {len(sleep_level_records)} sleep level records")
+                        logger.info(f"Inserted {len(filtered_sleep_level_records)} sleep level records")
                     except Exception as e:
                         logger.error(f"Error inserting sleep level records: {e}", exc_info=True)
                         success = False
@@ -886,7 +900,7 @@ class SupabaseClient:
             latest_timestamps = {
                 'heartRate': None,
                 'steps': None,
-                'activeEnergy': None,
+                'activity': None,
                 'sleep': None,
                 'workout': None
             }
@@ -925,7 +939,7 @@ class SupabaseClient:
                 
             if activity_result.data:
                 date_str = activity_result.data[0]['date']
-                latest_timestamps['activeEnergy'] = datetime.fromisoformat(f"{date_str}T23:59:59")
+                latest_timestamps['activity'] = datetime.fromisoformat(f"{date_str}T23:59:59")
             
             # Get latest sleep timestamp
             sleep_result = self.service_client.table('fitbit_sleep_daily_summary') \
@@ -941,7 +955,7 @@ class SupabaseClient:
             
             # For workout data, we'll use the activity table as a proxy
             # since workouts are reflected there as very_active_minutes
-            latest_timestamps['workout'] = latest_timestamps['activeEnergy']
+            latest_timestamps['workout'] = latest_timestamps['activity']
             
             logger.info(f"Latest timestamps: {latest_timestamps}")
             return latest_timestamps
@@ -951,411 +965,119 @@ class SupabaseClient:
             # In case of error, return all None to force fresh data upload
             return {k: None for k in latest_timestamps.keys()}
     
-    def get_health_data_for_analysis(self, user_id: str, days: int = 60, batch_size: int = 1000) -> Dict[str, Any]:
+    def get_health_data_for_analysis(self, user_id: str, days: int = 60) -> Dict[str, Any]:
         """
-        Get health data from Supabase tables for analysis
-        
-        This method retrieves stored health data from Supabase, converts it back to HealthKit-compatible
-        format, and returns it in a structure suitable for the mental health analysis algorithm.
-        
-        For sleep data, the method:
-        1. Retrieves summary-level sleep data (daily totals)
-        2. Retrieves detailed sleep stage data ordered by start_time
-        3. Converts Fitbit-formatted sleep stages back to HealthKit format
-        4. Includes both summary and detailed sleep data for comprehensive analysis
+        Get user health data from Supabase for analysis.
+        This retrieves raw data from Supabase tables without transforming formats.
         
         Args:
-            user_id: Supabase user ID to retrieve data for
+            user_id: User ID to fetch data for
             days: Number of days of data to retrieve (default: 60)
-            batch_size: Number of records to retrieve in each batch (default: 1000)
-            
-        Returns:
-            Dictionary containing health data in HealthKit-compatible format, with keys:
-            - heartRate: Heart rate measurements
-            - steps: Step count data
-            - activeEnergy: Active energy data
-            - sleep: Sleep analysis data
-            - workout: Workout data
-            - distance: Distance data
-            - basalEnergy: Basal energy data
-            - flightsClimbed: Flights climbed data
-            - userInfo: User demographic information
         """
         try:
-            logger.info(f"Getting health data for analysis from user {user_id}")
+            logger.info(f"Retrieving user health data for analysis: user_id={user_id}, days={days}")
             
-            # Calculate the date range
+            # Get user profile information for demographic data
+            user_profile = self.get_user_profile(user_id)
+            
+            # Calculate date range for specified days
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
             
-            # Initialize data structure for results
-            health_data = {
-                "heartRate": [],
-                "steps": [],
-                "activeEnergy": [],
-                "sleep": [],
-                "workout": [],
-                "distance": [],
-                "basalEnergy": [],
-                "flightsClimbed": [],
-                "userInfo": {
-                    "userId": user_id,
-                    "age": 33,  # Default value, will be updated if profile data is found
-                    "genderBinary": 1  # Default value (female), will be updated if profile data is found
-                }
+            # Format dates for Supabase query
+            start_date_str = start_date.strftime("%Y-%m-%d")
+            end_date_str = end_date.strftime("%Y-%m-%d")
+            
+            # Get heart rate data
+            heart_rate_data = self._fetch_table_data(
+                "fitbit_heart_rate_level", 
+                user_id,
+                start_date_str,
+                end_date_str,
+                date_column="date"
+            )
+            
+            # Get sleep data - directly use the Fitbit format data without converting
+            sleep_data = self._fetch_table_data(
+                "fitbit_sleep_daily_summary", 
+                user_id,
+                start_date_str,
+                end_date_str,
+                date_column="sleep_date"
+            )
+            
+            # Get activity data
+            activity_data = self._fetch_table_data(
+                "fitbit_activity", 
+                user_id,
+                start_date_str,
+                end_date_str,
+                date_column="date"
+            )
+            
+            # Get steps data
+            steps_data = self._fetch_table_data(
+                "fitbit_intraday_steps", 
+                user_id,
+                start_date_str,
+                end_date_str,
+                date_column="date",
+                group_by="date"
+            )
+            
+            # Compute last sync date
+            all_dates = []
+            for data_list in [heart_rate_data, sleep_data, activity_data, steps_data]:
+                if data_list:
+                    for item in data_list:
+                        for date_key in ["date", "sleep_date"]:
+                            if date_key in item:
+                                try:
+                                    date_str = item[date_key]
+                                    if isinstance(date_str, str) and date_str:
+                                        all_dates.append(datetime.fromisoformat(date_str.replace("Z", "+00:00")))
+                                except (ValueError, TypeError):
+                                    pass
+            
+            last_sync_date = max(all_dates) if all_dates else None
+            logger.info(f"Retrieved health data: HR={len(heart_rate_data)}, Sleep={len(sleep_data)}, Activity={len(activity_data)}")
+            
+            # Prepare user information
+            user_info = {
+                "userId": user_id,
+                "personId": user_id,  # Use same ID for compatibility
+                "age": user_profile.get("age"),
+                "genderBinary": user_profile.get("gender_binary", 1),  # Default to female if missing
+                "lastSyncDate": last_sync_date.isoformat() if last_sync_date else None
             }
             
-            # Get profile data
-            try:
-                profile_result = self.service_client.table('person_dataset') \
-                    .select('*') \
-                    .eq('person_id', user_id) \
-                    .execute()
-                
-                if profile_result.data and len(profile_result.data) > 0:
-                    profile = profile_result.data[0]
-                    
-                    # Get gender and convert to binary (1 for female, 0 for others)
-                    gender = profile.get('gender', '')
-                    gender_binary = 1 if gender == 'FEMALE' else 0
-                    
-                    # Get age from birthdate
-                    birthdate_str = profile.get('age', '')  # Stored in the 'age' column
-                    if birthdate_str:
-                        try:
-                            birthdate = datetime.fromisoformat(birthdate_str.replace('Z', '+00:00'))
-                            age = end_date.year - birthdate.year
-                            # Adjust age if birthday hasn't occurred yet this year
-                            if (end_date.month, end_date.day) < (birthdate.month, birthdate.day):
-                                age -= 1
-                        except Exception as e:
-                            logger.warning(f"Error calculating age from birthdate: {e}")
-                            age = 33  # Default age
-                    else:
-                        age = 33  # Default age
-                    
-                    # Update userInfo with profile data
-                    health_data["userInfo"].update({
-                        "age": age,
-                        "genderBinary": gender_binary,
-                        "gender": gender
-                    })
-                    
-                    logger.info(f"Retrieved profile for user {user_id}: age={age}, gender={gender}, genderBinary={gender_binary}")
-                else:
-                    logger.warning(f"No profile found for user {user_id}, using default values")
-            except Exception as e:
-                logger.warning(f"Error retrieving user profile: {e}")
-            
-            # Format dates for Supabase queries
-            start_date_str = start_date.strftime('%Y-%m-%d')
-            end_date_str = end_date.strftime('%Y-%m-%d')
-            
-            # Fetch heart rate data with pagination
-            def fetch_heart_rate_data():
-                offset = 0
-                total_records = 0
-                has_more = True
-                
-                while has_more:
-                    heart_rate_result = self.service_client.table('fitbit_heart_rate_level') \
-                        .select('*') \
-                        .eq('person_id', user_id) \
-                        .gte('date', start_date_str) \
-                        .range(offset, offset + batch_size - 1) \
-                        .execute()
-                        
-                    if heart_rate_result.data:
-                        for entry in heart_rate_result.data:
-                            date_str = entry['date']
-                            date_time = datetime.strptime(f"{date_str} 12:00:00", '%Y-%m-%d %H:%M:%S')
-                            iso_date = date_time.isoformat() + 'Z'
-                            
-                            health_data["heartRate"].append({
-                                "type": "HKQuantityTypeIdentifierHeartRate",
-                                "startDate": iso_date,
-                                "endDate": iso_date,
-                                "value": entry['avg_rate'],
-                                "unit": "count/min"
-                            })
-                        
-                        records_fetched = len(heart_rate_result.data)
-                        total_records += records_fetched
-                        offset += batch_size
-                        
-                        # Check if we have more records to fetch
-                        has_more = records_fetched == batch_size
-                    else:
-                        has_more = False
-                
-                return total_records
-            
-            # Fetch step data with pagination
-            def fetch_step_data():
-                offset = 0
-                total_records = 0
-                has_more = True
-                
-                while has_more:
-                    steps_result = self.service_client.table('fitbit_intraday_steps') \
-                        .select('*') \
-                        .eq('person_id', user_id) \
-                        .gte('date', start_date_str) \
-                        .range(offset, offset + batch_size - 1) \
-                        .execute()
-                        
-                    if steps_result.data:
-                        for entry in steps_result.data:
-                            date_str = entry['date']
-                            date_time = datetime.strptime(f"{date_str} 23:59:59", '%Y-%m-%d %H:%M:%S')
-                            iso_date = date_time.isoformat() + 'Z'
-                            
-                            health_data["steps"].append({
-                                "type": "HKQuantityTypeIdentifierStepCount",
-                                "startDate": iso_date,
-                                "endDate": iso_date,
-                                "value": entry['sum_steps'],
-                                "unit": "count"
-                            })
-                        
-                        records_fetched = len(steps_result.data)
-                        total_records += records_fetched
-                        offset += batch_size
-                        
-                        # Check if we have more records to fetch
-                        has_more = records_fetched == batch_size
-                    else:
-                        has_more = False
-                
-                return total_records
-            
-            # Fetch activity data with pagination
-            def fetch_activity_data():
-                offset = 0
-                total_records = 0
-                has_more = True
-                
-                while has_more:
-                    activity_result = self.service_client.table('fitbit_activity') \
-                        .select('*') \
-                        .eq('person_id', user_id) \
-                        .gte('date', start_date_str) \
-                        .range(offset, offset + batch_size - 1) \
-                        .execute()
-                        
-                    if activity_result.data:
-                        for entry in activity_result.data:
-                            date_str = entry['date']
-                            date_time = datetime.strptime(f"{date_str} 23:59:59", '%Y-%m-%d %H:%M:%S')
-                            iso_date = date_time.isoformat() + 'Z'
-                            
-                            # Active energy
-                            health_data["activeEnergy"].append({
-                                "type": "HKQuantityTypeIdentifierActiveEnergyBurned",
-                                "startDate": iso_date,
-                                "endDate": iso_date,
-                                "value": entry['activity_calories'],
-                                "unit": "kcal"
-                            })
-                            
-                            # Workout data
-                            if entry['very_active_minutes'] > 0:
-                                duration_seconds = entry['very_active_minutes'] * 60
-                                
-                                health_data["workout"].append({
-                                    "type": "HKWorkoutTypeIdentifier",
-                                    "startDate": iso_date,
-                                    "endDate": iso_date,
-                                    "duration": duration_seconds,
-                                    "workoutActivityType": 37,
-                                    "totalEnergyBurned": entry['activity_calories'],
-                                    "value": duration_seconds
-                                })
-                        
-                        records_fetched = len(activity_result.data)
-                        total_records += records_fetched
-                        offset += batch_size
-                        
-                        # Check if we have more records to fetch
-                        has_more = records_fetched == batch_size
-                    else:
-                        has_more = False
-                
-                return total_records
-            
-            # Fetch sleep data with pagination
-            def fetch_sleep_data():
-                offset = 0
-                total_records = 0
-                has_more = True
-                
-                # Step 1: Fetch sleep summary data
-                while has_more:
-                    sleep_result = self.service_client.table('fitbit_sleep_daily_summary') \
-                        .select('*') \
-                        .eq('person_id', user_id) \
-                        .gte('sleep_date', start_date_str) \
-                        .range(offset, offset + batch_size - 1) \
-                        .execute()
-                        
-                    if sleep_result.data:
-                        for entry in sleep_result.data:
-                            date_str = entry['sleep_date']
-                            date_time = datetime.strptime(f"{date_str} 22:00:00", '%Y-%m-%d %H:%M:%S')
-                            iso_date = date_time.isoformat() + 'Z'
-                            
-                            end_time = date_time + timedelta(minutes=entry['minute_asleep'])
-                            iso_end_date = end_time.isoformat() + 'Z'
-                            
-                            # Create a main sleep record for the whole night
-                            health_data["sleep"].append({
-                                "type": "HKCategoryTypeIdentifierSleepAnalysis",
-                                "startDate": iso_date,
-                                "endDate": iso_end_date,
-                                "value": entry['minute_asleep'],
-                                "unit": "min"
-                            })
-                        
-                        records_fetched = len(sleep_result.data)
-                        total_records += records_fetched
-                        offset += batch_size
-                        
-                        # Check if we have more records to fetch
-                        has_more = records_fetched == batch_size
-                    else:
-                        has_more = False
-                
-                # Step 2: Fetch detailed sleep level data
-                offset = 0
-                has_more = True
-                
-                # Dictionary to map Fitbit sleep levels to HealthKit values
-                sleep_level_mapping = {
-                    'deep': '3',  # HKCategoryValueSleepAnalysisAsleepDeep
-                    'light': '5', # HKCategoryValueSleepAnalysisAsleepCore
-                    'rem': '4',   # HKCategoryValueSleepAnalysisAsleepREM
-                    'wake': '2',  # HKCategoryValueSleepAnalysisAwake
-                    'restless': '0' # HKCategoryValueSleepAnalysisInBed
-                }
-                
-                while has_more:
-                    # Order by start_time instead of seconds_from_start_of_day
-                    try:
-                        level_result = self.service_client.table('fitbit_sleep_level') \
-                            .select('*') \
-                            .eq('person_id', user_id) \
-                            .gte('sleep_date', start_date_str) \
-                            .order('start_time', desc=False) \
-                            .range(offset, offset + batch_size - 1) \
-                            .execute()
-                    except Exception as e:
-                        # Fallback to ordering by sleep_date if start_time ordering fails
-                        logger.warning(f"Error ordering by start_time: {e}, falling back to sleep_date ordering")
-                        level_result = self.service_client.table('fitbit_sleep_level') \
-                            .select('*') \
-                            .eq('person_id', user_id) \
-                            .gte('sleep_date', start_date_str) \
-                            .order('sleep_date', desc=False) \
-                            .range(offset, offset + batch_size - 1) \
-                            .execute()
-                        
-                    if level_result.data:
-                        for level_entry in level_result.data:
-                            # Get the sleep date
-                            sleep_date_str = level_entry['sleep_date']
-                            
-                            try:
-                                # Get start and end times
-                                start_time_str = level_entry.get('start_time')
-                                end_time_str = level_entry.get('end_time')
-                                duration = level_entry.get('duration', 0)
-                                
-                                # Ensure we have valid times
-                                if not start_time_str or not end_time_str:
-                                    # Fallback if times are missing
-                                    logger.warning("Missing start/end time for sleep level entry")
-                                    continue
-                                
-                                # Parse the times - handle different timestamp formats
-                                try:
-                                    # Try to parse with dateutil which handles many formats
-                                    start_dt = dateutil.parser.parse(start_time_str)
-                                    end_dt = dateutil.parser.parse(end_time_str)
-                                except Exception:
-                                    # Fallback if dateutil fails
-                                    try:
-                                        # Try ISO format (used in many databases)
-                                        start_dt = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                                        end_dt = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-                                    except Exception:
-                                        # Last resort fallback
-                                        logger.warning(f"Could not parse sleep timestamps: {start_time_str}, {end_time_str}")
-                                        continue
-                                
-                                # Ensure times are in ISO format with Z suffix
-                                iso_start = start_dt.isoformat().replace('+00:00', 'Z')
-                                if not iso_start.endswith('Z'):
-                                    iso_start = iso_start + 'Z'
-                                    
-                                iso_end = end_dt.isoformat().replace('+00:00', 'Z')
-                                if not iso_end.endswith('Z'):
-                                    iso_end = iso_end + 'Z'
-                                
-                                # Map Fitbit sleep level to HealthKit value
-                                level = level_entry.get('level', 'light')
-                                hk_value = sleep_level_mapping.get(level, '1')  # Default to asleep unspecified
-                                
-                                # Add detailed sleep stage data
-                                health_data["sleep"].append({
-                                    "type": "HKCategoryTypeIdentifierSleepAnalysis",
-                                    "startDate": iso_start,
-                                    "endDate": iso_end,
-                                    "value": hk_value,
-                                    "sleep_stage": level,
-                                    "duration": duration,
-                                    "unit": "min"
-                                })
-                            except Exception as e:
-                                logger.warning(f"Error processing sleep level entry: {e}")
-                                continue
-                        
-                        level_records_fetched = len(level_result.data)
-                        total_records += level_records_fetched
-                        offset += batch_size
-                        
-                        # Check if we have more records to fetch
-                        has_more = level_records_fetched == batch_size
-                    else:
-                        has_more = False
-                
-                return total_records
-            
-            # Execute the fetch operations and log the results
-            hr_count = fetch_heart_rate_data()
-            steps_count = fetch_step_data()
-            activity_count = fetch_activity_data()
-            sleep_count = fetch_sleep_data()
-            
-            logger.info(f"Retrieved health data for user {user_id}: heart rate: {hr_count}, steps: {steps_count}, activity: {activity_count}, sleep: {sleep_count}")
-            
-            return health_data
-            
-        except Exception as e:
-            logger.error(f"Error getting health data for analysis: {str(e)}", exc_info=True)
+            # Return data as a dictionary that matches the structure expected by HealthKitData
             return {
+                "userInfo": user_info,
+                "heartRate": heart_rate_data,
+                "sleep": sleep_data,
+                "steps": steps_data,
+                "workout": [],  # Not used in current implementation
+                "distance": [],
+                "basalEnergy": [],
+                "flightsClimbed": [],
+                "activity": activity_data,
+                "deviceInfo": {"source": "Supabase", "version": "1.0"}
+            }
+        except Exception as e:
+            logger.error(f"Error retrieving health data for analysis: {e}", exc_info=True)
+            # Return empty data structure on error
+            return {
+                "userInfo": {"userId": user_id, "personId": user_id, "age": 33, "genderBinary": 1},
                 "heartRate": [],
-                "steps": [],
-                "activeEnergy": [],
                 "sleep": [],
+                "steps": [],
                 "workout": [],
                 "distance": [],
                 "basalEnergy": [],
                 "flightsClimbed": [],
-                "userInfo": {
-                    "userId": user_id,
-                    "age": 33,
-                    "genderBinary": 1
-                }
+                "activity": [],
+                "deviceInfo": {"source": "Supabase", "version": "1.0"}
             }
     
     def check_missing_data_types(self, user_id: str, days: int = 60) -> Dict[str, Any]:
@@ -1370,7 +1092,7 @@ class SupabaseClient:
             missing_data = {
                 "heartRate": True,
                 "steps": True,
-                "activeEnergy": True,
+                "activity": True,
                 "sleep": True,
                 "workout": True
             }
@@ -1378,7 +1100,7 @@ class SupabaseClient:
             data_coverage = {
                 "heartRate": {"count": 0, "days_covered": 0, "earliest_date": None, "latest_date": None},
                 "steps": {"count": 0, "days_covered": 0, "earliest_date": None, "latest_date": None},
-                "activeEnergy": {"count": 0, "days_covered": 0, "earliest_date": None, "latest_date": None},
+                "activity": {"count": 0, "days_covered": 0, "earliest_date": None, "latest_date": None},
                 "sleep": {"count": 0, "days_covered": 0, "earliest_date": None, "latest_date": None},
                 "workout": {"count": 0, "days_covered": 0, "earliest_date": None, "latest_date": None}
             }
@@ -1452,12 +1174,12 @@ class SupabaseClient:
                 .execute()
             
             if activity_result.data and len(activity_result.data) > 0:
-                missing_data["activeEnergy"] = False
-                data_coverage["activeEnergy"]["count"] = len(activity_result.data)
+                missing_data["activity"] = False
+                data_coverage["activity"]["count"] = len(activity_result.data)
                 dates = sorted(list(set([row['date'] for row in activity_result.data])))
-                data_coverage["activeEnergy"]["days_covered"] = len(dates)
-                data_coverage["activeEnergy"]["earliest_date"] = dates[0] if dates else None
-                data_coverage["activeEnergy"]["latest_date"] = dates[-1] if dates else None
+                data_coverage["activity"]["days_covered"] = len(dates)
+                data_coverage["activity"]["earliest_date"] = dates[0] if dates else None
+                data_coverage["activity"]["latest_date"] = dates[-1] if dates else None
                 
                 # Check for workout data (very active minutes)
                 workout_result = self.service_client.table('fitbit_activity') \
@@ -1554,7 +1276,7 @@ class SupabaseClient:
                 "missingDataTypes": {
                     "heartRate": True,
                     "steps": True,
-                    "activeEnergy": True,
+                    "activity": True,
                     "sleep": True,
                     "workout": True
                 },
@@ -1623,7 +1345,7 @@ class SupabaseClient:
                 missing_required.append(data_type)
         
         # Also evaluate non-required but beneficial data types
-        optional_data_types = ["activeEnergy", "workout"]
+        optional_data_types = ["activity", "workout"]
         
         for data_type in optional_data_types:
             if data_type in coverage_info["dataCoverageSummary"]:
@@ -1667,7 +1389,7 @@ class SupabaseClient:
                         'fitbit_heart_rate_level' if data_type == 'heartRate' else \
                         'fitbit_intraday_steps' if data_type == 'steps' else 'fitbit_activity'
                 
-                # Add specific condition for workout and activeEnergy
+                # Add specific condition for workout and activity
                 condition = None
                 if data_type == 'workout':
                     condition = self.service_client.table(table) \
@@ -1675,7 +1397,7 @@ class SupabaseClient:
                         .eq('person_id', user_id) \
                         .gt('very_active_minutes', 0) \
                         .gte(date_field, (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d'))
-                elif data_type == 'activeEnergy':
+                elif data_type == 'activity':
                     condition = self.service_client.table(table) \
                         .select(date_field) \
                         .eq('person_id', user_id) \
@@ -1799,3 +1521,116 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"Error updating user profile: {str(e)}", exc_info=True)
             return False 
+    
+    def _fetch_table_data(self, table_name: str, user_id: str, 
+                          start_date: str, end_date: str, 
+                          date_column: str = "date", 
+                          group_by: str = None) -> List[Dict]:
+        """
+        Helper method to fetch data from a specific Supabase table with pagination.
+        Returns data directly without any transformations.
+        
+        Args:
+            table_name: Name of the Supabase table
+            user_id: The user's ID
+            start_date: Start date for the data range (YYYY-MM-DD)
+            end_date: End date for the data range (YYYY-MM-DD)
+            date_column: Name of the date column in the table
+            group_by: Optional column to group results by
+            
+        Returns:
+            List of data records directly from Supabase
+        """
+        try:
+            all_data = []
+            page_size = 1000  # Supabase default limit
+            start_index = 0
+            has_more = True
+            
+            logger.info(f"Fetching data from {table_name} for user {user_id} with pagination")
+            
+            while has_more:
+                query = self.service_client.table(table_name) \
+                    .select('*') \
+                    .eq('person_id', user_id) \
+                    .gte(date_column, start_date) \
+                    .lte(date_column, end_date) \
+                    .order(date_column, desc=False) \
+                    .range(start_index, start_index + page_size - 1)
+                    
+                result = query.execute()
+                
+                if not result.data:
+                    if start_index == 0:
+                        logger.info(f"No data found in {table_name} for user {user_id}")
+                    break
+                    
+                all_data.extend(result.data)
+                data_count = len(result.data)
+                
+                logger.info(f"Retrieved {data_count} records from {table_name} (page {start_index//page_size + 1})")
+                
+                if data_count < page_size:
+                    # Received fewer records than requested, so we've reached the end
+                    has_more = False
+                else:
+                    # Move to the next page
+                    start_index += page_size
+            
+            logger.info(f"Total records retrieved from {table_name}: {len(all_data)}")
+            return all_data
+                
+        except Exception as e:
+            logger.error(f"Error fetching data from {table_name}: {e}")
+            return []
+            
+    def get_user_profile(self, user_id: str) -> Dict:
+        """
+        Get user profile information from Supabase
+        
+        Args:
+            user_id: The user's ID
+            
+        Returns:
+            Dictionary containing user profile data
+        """
+        try:
+            result = self.service_client.table('person_dataset') \
+                .select('*') \
+                .eq('person_id', user_id) \
+                .execute()
+                
+            if not result.data or len(result.data) == 0:
+                logger.warning(f"No profile found for user {user_id}")
+                return {"age": 33, "gender_binary": 1}
+                
+            profile = result.data[0]
+            
+            # Convert gender to binary format (1 for female, 0 for others)
+            gender = profile.get('gender', '')
+            gender_binary = 1 if gender and gender.upper() == 'FEMALE' else 0
+            
+            # Get age from birthdate or use age field directly
+            age = profile.get('age', 33)
+            
+            # If age field actually contains a birthdate, calculate the age
+            if isinstance(age, str) and age:
+                try:
+                    birthdate = datetime.fromisoformat(age.replace('Z', '+00:00'))
+                    today = datetime.now()
+                    age = today.year - birthdate.year
+                    # Adjust age if birthday hasn't occurred yet this year
+                    if (today.month, today.day) < (birthdate.month, birthdate.day):
+                        age -= 1
+                except Exception as e:
+                    logger.warning(f"Error calculating age from birthdate: {e}")
+                    age = 33  # Default age
+                    
+            return {
+                "age": age,
+                "gender_binary": gender_binary,
+                "gender": gender
+            }
+        except Exception as e:
+            logger.error(f"Error retrieving user profile: {e}")
+            return {"age": 33, "gender_binary": 1} 

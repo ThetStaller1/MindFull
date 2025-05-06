@@ -48,7 +48,8 @@ class HealthKitExtractor:
     
     def process_healthkit_data(self, health_data, person_id=None, age=None, gender_binary=None):
         """
-        Process HealthKit data into Fitbit-compatible format for storage in Supabase.
+        Process HealthKit data into features for the mental health model, exactly matching
+        the original training data format.
         
         Args:
             health_data: Raw HealthKit data from the iOS app
@@ -59,7 +60,7 @@ class HealthKitExtractor:
         Returns:
             pandas DataFrame with features for the mental health model
         """
-        logger.info("Processing HealthKit data into Fitbit format")
+        logger.info("Processing HealthKit data into model-ready features")
         
         # Convert to dictionary if it's a Pydantic model
         data_dict = health_data
@@ -108,7 +109,7 @@ class HealthKitExtractor:
             }).reset_index()
             
             # Rename columns
-            steps_daily.columns = ['date', 'sum_steps']
+            steps_daily.columns = ['date', 'steps']
             
             # Add person_id
             steps_daily['person_id'] = person_id
@@ -153,7 +154,8 @@ class HealthKitExtractor:
                     'very_active_minutes': very_active_minutes,
                     'fairly_active_minutes': fairly_active_minutes,
                     'lightly_active_minutes': lightly_active_minutes,
-                    'sedentary_minutes': sedentary_minutes
+                    'sedentary_minutes': sedentary_minutes,
+                    'calories_out': int(activity_calories) + 1500  # Base calories + activity
                 })
         
         # Update with workout data if available
@@ -182,15 +184,22 @@ class HealthKitExtractor:
                         'very_active_minutes': int(row.get('duration', 0) / 60),
                         'fairly_active_minutes': 30,
                         'lightly_active_minutes': 60,
-                        'sedentary_minutes': sedentary_minutes
+                        'sedentary_minutes': sedentary_minutes,
+                        'calories_out': int(row.get('totalEnergyBurned', 300)) + 1500  # Base calories + activity
                     })
         
         # Create activity DataFrame
         if activity_records:
             activity_df = pd.DataFrame(activity_records)
+            # Calculate activity ratio matching the original model
+            activity_df['total_active_minutes'] = (activity_df['very_active_minutes'] + 
+                                                activity_df['fairly_active_minutes'] + 
+                                                activity_df['lightly_active_minutes'])
+            activity_df['activity_ratio'] = activity_df['total_active_minutes'] / (activity_df['sedentary_minutes'] + 1)
             fitbit_data['fitbit_activity'] = activity_df
         
-        # Sleep data
+        # Sleep data - Exact match to the original model processing
+        sleep_records = []
         if 'sleep_analysis' in extracted_data and not extracted_data['sleep_analysis'].empty:
             sleep_df = extracted_data['sleep_analysis']
             
@@ -206,95 +215,229 @@ class HealthKitExtractor:
                 sleep_df['minute_asleep'] = (pd.to_datetime(sleep_df['endDate']) - pd.to_datetime(sleep_df['startDate'])).dt.total_seconds() / 60
                 logger.info("Calculated sleep duration from timestamps for summary (fallback method)")
             
-            # Group by date
-            sleep_daily = sleep_df.groupby('sleep_date').agg({
-                'minute_asleep': 'sum',
-                'startDate': 'min',
-                'endDate': 'max'
-            }).reset_index()
-            
-            # Add calculated fields
-            sleep_daily['minute_awake'] = 30  # Default estimate
-            sleep_daily['minute_in_bed'] = sleep_daily['minute_asleep'] + sleep_daily['minute_awake']
-            sleep_daily['person_id'] = person_id
-            
-            # Clean up and format
-            sleep_daily = sleep_daily[['person_id', 'sleep_date', 'minute_asleep', 'minute_awake', 'minute_in_bed']]
-            sleep_daily['sleep_date'] = sleep_daily['sleep_date'].astype(str)
-            
-            fitbit_data['fitbit_sleep_daily_summary'] = sleep_daily
-            
-            # Create sleep level data if possible
-            if 'value' in sleep_df.columns:
-                sleep_level_records = []
+            # Add sleep stage information
+            if 'sleep_stage' in sleep_df.columns:
+                # Calculate minutes per sleep stage from the detailed data
+                sleep_stage_minutes = {}
                 
                 for _, row in sleep_df.iterrows():
-                    # Get duration from either the explicit duration field or the calculated minute_asleep
-                    duration = row.get('duration', row['minute_asleep'])
+                    date = row['sleep_date']
+                    stage = row.get('sleep_stage', 'unknown').lower()
+                    duration = row['minute_asleep']
                     
-                    sleep_level_records.append({
-                        'person_id': person_id or '1001',
-                        'sleep_date': row['sleep_date'].strftime('%Y-%m-%d'),
-                        'level': 'light',  # Default level
-                        'start_time': pd.to_datetime(row['startDate']).strftime('%H:%M:%S'),
-                        'duration': int(duration)
-                    })
+                    # Skip invalid durations
+                    if duration <= 0:
+                        continue
+                    
+                    date_str = date.strftime('%Y-%m-%d')
+                    if date_str not in sleep_stage_minutes:
+                        sleep_stage_minutes[date_str] = {
+                            'minute_deep': 0,
+                            'minute_light': 0,
+                            'minute_rem': 0,
+                            'minute_awake': 0,
+                            'minute_asleep': 0
+                        }
+                    
+                    # Map the sleep stage and accumulate minutes
+                    if 'deep' in stage:
+                        sleep_stage_minutes[date_str]['minute_deep'] += duration
+                    elif 'light' in stage or 'core' in stage:
+                        sleep_stage_minutes[date_str]['minute_light'] += duration
+                    elif 'rem' in stage:
+                        sleep_stage_minutes[date_str]['minute_rem'] += duration
+                    elif 'awake' in stage or 'wake' in stage:
+                        sleep_stage_minutes[date_str]['minute_awake'] += duration
+                    
+                    # Accumulate total sleep time
+                    if stage != 'awake' and stage != 'wake':
+                        sleep_stage_minutes[date_str]['minute_asleep'] += duration
                 
-                if sleep_level_records:
-                    sleep_level_df = pd.DataFrame(sleep_level_records)
-                    fitbit_data['fitbit_sleep_level'] = sleep_level_df
+                # Create summary records
+                for date_str, minutes in sleep_stage_minutes.items():
+                    sleep_records.append({
+                        'person_id': person_id,
+                        'sleep_date': date_str,
+                        'minute_asleep': minutes['minute_asleep'],
+                        'minute_deep': minutes['minute_deep'],
+                        'minute_light': minutes['minute_light'],
+                        'minute_rem': minutes['minute_rem'],
+                        'minute_awake': minutes['minute_awake'],
+                        'minute_in_bed': minutes['minute_asleep'] + minutes['minute_awake']
+                    })
+            else:
+                # Group by date for basic summary if no stage data
+                sleep_daily = sleep_df.groupby('sleep_date').agg({
+                    'minute_asleep': 'sum',
+                    'startDate': 'min',
+                    'endDate': 'max'
+                }).reset_index()
+                
+                # Add calculated fields
+                sleep_daily['minute_awake'] = 30  # Default estimate
+                sleep_daily['minute_in_bed'] = sleep_daily['minute_asleep'] + sleep_daily['minute_awake']
+                sleep_daily['person_id'] = person_id
+                
+                # Add sleep stage estimates based on typical percentages
+                sleep_daily['minute_deep'] = sleep_daily['minute_asleep'] * 0.2
+                sleep_daily['minute_light'] = sleep_daily['minute_asleep'] * 0.5
+                sleep_daily['minute_rem'] = sleep_daily['minute_asleep'] * 0.25
+                
+                # Convert to records
+                for _, row in sleep_daily.iterrows():
+                    sleep_records.append({
+                        'person_id': row['person_id'],
+                        'sleep_date': row['sleep_date'].strftime('%Y-%m-%d'),
+                        'minute_asleep': row['minute_asleep'],
+                        'minute_deep': row['minute_deep'],
+                        'minute_light': row['minute_light'],
+                        'minute_rem': row['minute_rem'],
+                        'minute_awake': row['minute_awake'],
+                        'minute_in_bed': row['minute_in_bed']
+                    })
+        
+        # Create sleep DataFrame and calculate sleep regularity features
+        if sleep_records:
+            sleep_df = pd.DataFrame(sleep_records)
+            sleep_df['sleep_date'] = pd.to_datetime(sleep_df['sleep_date'])
+            sleep_df = sleep_df.sort_values(['person_id', 'sleep_date'])
+            
+            # Add sleep regularity metrics to match original model
+            sleep_df['sleep_start'] = sleep_df['sleep_date']
+            sleep_df['next_day_start'] = sleep_df.groupby('person_id')['sleep_start'].shift(-1)
+            sleep_df['time_diff'] = (sleep_df['next_day_start'] - sleep_df['sleep_start']).dt.total_seconds() / 3600
+            
+            # Add weekend vs weekday comparison
+            sleep_df['is_weekend'] = sleep_df['sleep_date'].dt.dayofweek.isin([5, 6])
+            
+            # Convert back to strings for Supabase
+            sleep_df['sleep_date'] = sleep_df['sleep_date'].dt.strftime('%Y-%m-%d')
+            
+            fitbit_data['fitbit_sleep_daily_summary'] = sleep_df
         
         logger.info(f"Processed {len(fitbit_data)} Fitbit-compatible data tables")
         for table, df in fitbit_data.items():
             logger.info(f"  - {table}: {len(df)} records")
         
-        # Extract features from fitbit_data for model prediction
-        # Create a features DataFrame with demographic info
+        # ---------------------------------------------------------------
+        # CREATE FEATURES FOR MODEL USING EXACT SAME APPROACH AS ORIGINAL
+        # ---------------------------------------------------------------
         features_df = pd.DataFrame({
             'age': [age if age is not None else 0],
             'gender_binary': [gender_binary if gender_binary is not None else 0],
             'person_id': [person_id if person_id is not None else '1001']
         })
         
-        # Extract heart rate features if available
-        if 'fitbit_heart_rate_level' in fitbit_data:
-            hr_df = fitbit_data['fitbit_heart_rate_level']
-            features_df['heart_rate_avg'] = hr_df['avg_rate'].mean() if not hr_df.empty else 0
-            features_df['heart_rate_min'] = hr_df['min_rate'].min() if not hr_df.empty else 0
-            features_df['heart_rate_max'] = hr_df['max_rate'].max() if not hr_df.empty else 0
-            features_df['heart_rate_std'] = hr_df['avg_rate'].std() if not hr_df.empty and len(hr_df) > 1 else 0
-        
-        # Extract step features if available
-        if 'fitbit_intraday_steps' in fitbit_data:
-            steps_df = fitbit_data['fitbit_intraday_steps']
-            features_df['steps_daily_mean'] = steps_df['sum_steps'].mean() if not steps_df.empty else 0
-            features_df['steps_daily_std'] = steps_df['sum_steps'].std() if not steps_df.empty and len(steps_df) > 1 else 0
-            features_df['steps_daily_max'] = steps_df['sum_steps'].max() if not steps_df.empty else 0
-        
-        # Extract activity features if available
-        if 'fitbit_activity' in fitbit_data:
-            activity_df = fitbit_data['fitbit_activity']
-            features_df['activity_very_active_minutes_mean'] = activity_df['very_active_minutes'].mean() if not activity_df.empty else 0
-            features_df['activity_very_active_minutes_std'] = activity_df['very_active_minutes'].std() if not activity_df.empty and len(activity_df) > 1 else 0
-            features_df['activity_very_active_minutes_max'] = activity_df['very_active_minutes'].max() if not activity_df.empty else 0
-            features_df['activity_calories_mean'] = activity_df['activity_calories'].mean() if not activity_df.empty else 0
-            features_df['activity_calories_std'] = activity_df['activity_calories'].std() if not activity_df.empty and len(activity_df) > 1 else 0
-        
-        # Extract sleep features if available
-        if 'fitbit_sleep_daily_summary' in fitbit_data:
+        # 1. SLEEP FEATURES - Match original model
+        if 'fitbit_sleep_daily_summary' in fitbit_data and not fitbit_data['fitbit_sleep_daily_summary'].empty:
             sleep_df = fitbit_data['fitbit_sleep_daily_summary']
-            features_df['sleep_minute_asleep_mean'] = sleep_df['minute_asleep'].mean() if not sleep_df.empty else 0
-            features_df['sleep_minute_asleep_std'] = sleep_df['minute_asleep'].std() if not sleep_df.empty and len(sleep_df) > 1 else 0
-            features_df['sleep_minute_awake_mean'] = sleep_df['minute_awake'].mean() if not sleep_df.empty else 0
-            features_df['sleep_minute_awake_std'] = sleep_df['minute_awake'].std() if not sleep_df.empty and len(sleep_df) > 1 else 0
+            sleep_df['sleep_date'] = pd.to_datetime(sleep_df['sleep_date'])
+            sleep_df = sleep_df.sort_values(['person_id', 'sleep_date'])
             
-            # Add placeholder values for deep, light, and REM sleep since we don't have actual values
-            features_df['sleep_minute_deep_mean'] = features_df['sleep_minute_asleep_mean'] * 0.2 if not sleep_df.empty else 0
-            features_df['sleep_minute_deep_std'] = features_df['sleep_minute_asleep_std'] * 0.2 if not sleep_df.empty and len(sleep_df) > 1 else 0
-            features_df['sleep_minute_light_mean'] = features_df['sleep_minute_asleep_mean'] * 0.5 if not sleep_df.empty else 0
-            features_df['sleep_minute_light_std'] = features_df['sleep_minute_asleep_std'] * 0.5 if not sleep_df.empty and len(sleep_df) > 1 else 0
-            features_df['sleep_minute_rem_mean'] = features_df['sleep_minute_asleep_mean'] * 0.3 if not sleep_df.empty else 0
-            features_df['sleep_minute_rem_std'] = features_df['sleep_minute_asleep_std'] * 0.3 if not sleep_df.empty and len(sleep_df) > 1 else 0
+            # Calculate basic sleep metrics
+            sleep_metrics = {}
+            
+            # Basic sleep metrics
+            for col in ['minute_asleep', 'minute_deep', 'minute_light', 'minute_rem', 'minute_awake']:
+                if col in sleep_df.columns:
+                    metrics = sleep_df.groupby('person_id')[col].agg(['mean', 'std', 'min', 'max']).reset_index()
+                    # Only keep first row since we have a single person_id
+                    for stat in ['mean', 'std', 'min', 'max']:
+                        if stat in metrics.columns:
+                            col_name = f'sleep_{col}_{stat}'
+                            sleep_metrics[col_name] = metrics.iloc[0][stat]
+            
+            # Sleep regularity
+            if 'time_diff' in sleep_df.columns:
+                regularity = sleep_df.groupby('person_id')['time_diff'].agg(['std', 'mean']).reset_index()
+                if not regularity.empty:
+                    sleep_metrics['sleep_time_diff_std'] = regularity.iloc[0]['std']
+                    sleep_metrics['sleep_time_diff_mean'] = regularity.iloc[0]['mean']
+            
+            # Weekend vs weekday differences (social jetlag)
+            if 'is_weekend' in sleep_df.columns:
+                weekend_stats = sleep_df[sleep_df['is_weekend']].groupby('person_id')['minute_asleep'].mean().reset_index()
+                weekday_stats = sleep_df[~sleep_df['is_weekend']].groupby('person_id')['minute_asleep'].mean().reset_index()
+                
+                if not weekend_stats.empty and not weekday_stats.empty:
+                    weekend_avg = weekend_stats.iloc[0]['minute_asleep'] if len(weekend_stats) > 0 else 0
+                    weekday_avg = weekday_stats.iloc[0]['minute_asleep'] if len(weekday_stats) > 0 else 0
+                    sleep_metrics['sleep_social_jetlag'] = abs(weekend_avg - weekday_avg)
+            
+            # Add sleep metrics to features
+            for key, value in sleep_metrics.items():
+                if pd.notna(value):  # Only add if not NaN
+                    features_df[key] = value
+                else:
+                    features_df[key] = 0
+        
+        # 2. ACTIVITY FEATURES - Match original model
+        if 'fitbit_activity' in fitbit_data and not fitbit_data['fitbit_activity'].empty:
+            activity_df = fitbit_data['fitbit_activity']
+            
+            # Calculate activity metrics
+            activity_metrics = {}
+            
+            # Calculate all required metrics
+            for col in ['very_active_minutes', 'fairly_active_minutes', 'lightly_active_minutes', 
+                        'sedentary_minutes', 'activity_ratio', 'steps', 'calories_out']:
+                if col in activity_df.columns:
+                    stats = ['mean', 'std']
+                    if col in ['very_active_minutes', 'steps', 'calories_out']:
+                        stats.append('max')
+                    
+                    metrics = activity_df.groupby('person_id')[col].agg(stats).reset_index()
+                    # Only keep first row since we have a single person_id
+                    for stat in stats:
+                        col_name = f'activity_{col}_{stat}'
+                        if len(metrics) > 0:
+                            activity_metrics[col_name] = metrics.iloc[0][stat]
+            
+            # Add activity metrics to features
+            for key, value in activity_metrics.items():
+                if pd.notna(value):  # Only add if not NaN
+                    features_df[key] = value
+                else:
+                    features_df[key] = 0
+        
+        # 3. HEART RATE FEATURES - Match original model
+        if 'fitbit_heart_rate_level' in fitbit_data and not fitbit_data['fitbit_heart_rate_level'].empty:
+            hr_df = fitbit_data['fitbit_heart_rate_level']
+            
+            # Calculate heart rate metrics
+            hr_metrics = {}
+            
+            # Compute all required heart rate stats
+            stats = ['mean', 'std', 'min', 'max']
+            if 'avg_rate' in hr_df.columns:
+                metrics = hr_df.groupby('person_id')['avg_rate'].agg(stats).reset_index()
+                if not metrics.empty:
+                    for stat in stats:
+                        hr_metrics[f'hr_avg_rate_{stat}'] = metrics.iloc[0][stat]
+                
+                # Add skew if we have enough data points
+                if len(hr_df) > 2:
+                    try:
+                        from scipy.stats import skew
+                        skew_val = skew(hr_df['avg_rate'])
+                        hr_metrics['hr_avg_rate_skew'] = skew_val
+                    except:
+                        hr_metrics['hr_avg_rate_skew'] = 0
+                else:
+                    hr_metrics['hr_avg_rate_skew'] = 0
+            
+            # Add heart rate metrics to features
+            for key, value in hr_metrics.items():
+                if pd.notna(value):  # Only add if not NaN
+                    features_df[key] = value
+                else:
+                    features_df[key] = 0
+        
+        # Fill any missing values with means or zeros to match original model
+        features_df = features_df.fillna(features_df.mean())
+        for col in features_df.columns:
+            if pd.isna(features_df[col]).any():
+                features_df[col] = 0
         
         logger.info(f"Created features DataFrame with {features_df.shape[1]} columns")
         return features_df

@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header, B
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import pandas as pd
 import numpy as np
 import pickle
@@ -28,6 +28,18 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Application settings
+class Settings:
+    """Application settings loaded from environment variables"""
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_service_key = os.environ.get("SUPABASE_ANON_KEY", "")
+
+# Initialize settings
+settings = Settings()
+
+# Dictionary to store user-specific predictor instances
+user_predictors = {}
 
 # Create a custom filter to limit logging of large data structures
 class DataSizeFilter(logging.Filter):
@@ -96,9 +108,12 @@ class HealthKitData(BaseModel):
     distance: List[Dict[str, Any]]
     basalEnergy: List[Dict[str, Any]]
     flightsClimbed: List[Dict[str, Any]]
+    activity: List[Dict[str, Any]] = []
     userInfo: Dict[str, Any] = {
+        "userId": "unknown",
+        "personId": "unknown",
         "age": 33,
-        "genderBinary": 1  # Default: female
+        "genderBinary": 1
     }
 
 class UserProfileData(BaseModel):
@@ -108,12 +123,12 @@ class UserProfileData(BaseModel):
     age: int
 
 class AnalysisResult(BaseModel):
-    userId: str
+    user_id: str
     prediction: int
-    riskLevel: str
-    riskScore: float
-    contributingFactors: Dict[str, float]
-    analysisDate: str
+    risk_level: str
+    risk_score: float
+    contributing_factors: Dict[str, Any]
+    analysis_date: str
 
 class UserAuth(BaseModel):
     userId: str
@@ -224,146 +239,364 @@ class MentalHealthPredictor:
             logger.warning("No feature names available from any source, this will likely cause prediction errors")
         else:
             logger.info(f"Final feature set has {len(self.model_feature_names)} features: {self.model_feature_names[:5]}...")
+            logger.info(f"Complete list of expected features: {self.model_feature_names}")
             
         logger.info("Mental Health Predictor initialized successfully")
     
-    def transform_data(self, health_data: HealthKitData) -> pd.DataFrame:
-        """Transform HealthKit data to the format expected by the model using the standardized extractor"""
-        logger.info("Transforming health data using HealthKit extractor...")
+    def transform_data(self, health_data: Dict[str, Any]) -> pd.DataFrame:
+        """
+        Transform Supabase data (in Fitbit format) for model input.
+        This follows the same pattern as the training code to ensure consistency.
+        """
+        logger.info("Transforming Supabase data using Fitbit format...")
         
         try:
-            # Use the HealthKit extractor to process the data consistently with test code
-            features_df = self.extractor.process_healthkit_data(health_data)
+            # Get user information - similar to process_person_data in training
+            user_id = health_data["userInfo"].get("personId", "unknown")
+            age = health_data["userInfo"].get("age", 33)
+            gender_binary = health_data["userInfo"].get("genderBinary", 1)
             
-            # Log the feature information without dumping large dataframes
+            # Create base person dataframe
+            features_df = pd.DataFrame({
+                'person_id': [user_id],
+                'age': [age],
+                'gender_binary': [gender_binary]
+            })
+            
+            # Process sleep features - similar to process_sleep_features in training
+            sleep_features = {}
+            if health_data.get("sleep") and len(health_data["sleep"]) > 0:
+                try:
+                    sleep_df = pd.DataFrame(health_data["sleep"])
+                    
+                    # Calculate basic sleep metrics
+                    sleep_metrics = {
+                        'sleep_minute_asleep_mean': sleep_df['minute_asleep'].mean(),
+                        'sleep_minute_asleep_std': sleep_df['minute_asleep'].std(),
+                        'sleep_minute_asleep_min': sleep_df['minute_asleep'].min(),
+                        'sleep_minute_asleep_max': sleep_df['minute_asleep'].max()
+                    }
+                    
+                    # Process different sleep types if available
+                    for sleep_type in ['minute_deep', 'minute_light', 'minute_rem', 'minute_awake']:
+                        if sleep_type in sleep_df.columns:
+                            sleep_metrics[f'sleep_{sleep_type}_mean'] = sleep_df[sleep_type].mean()
+                            sleep_metrics[f'sleep_{sleep_type}_std'] = sleep_df[sleep_type].std()
+                    
+                    # Sleep regularity if enough data points
+                    if len(sleep_df) > 1 and 'sleep_date' in sleep_df.columns:
+                        sleep_df['sleep_date'] = pd.to_datetime(sleep_df['sleep_date'])
+                        sleep_df = sleep_df.sort_values('sleep_date')
+                        sleep_df['next_day'] = sleep_df['sleep_date'].shift(-1)
+                        sleep_df['time_diff'] = (sleep_df['next_day'] - sleep_df['sleep_date']).dt.total_seconds() / 3600
+                        
+                        if not sleep_df['time_diff'].isnull().all():
+                            sleep_metrics['sleep_time_diff_std'] = sleep_df['time_diff'].std()
+                            sleep_metrics['sleep_time_diff_mean'] = sleep_df['time_diff'].mean()
+                    
+                        # Calculate weekend vs weekday differences (social jetlag)
+                        if len(sleep_df) >= 7:
+                            sleep_df['is_weekend'] = sleep_df['sleep_date'].dt.dayofweek.isin([5, 6])
+                            weekend_stats = sleep_df[sleep_df['is_weekend']]['minute_asleep'].mean()
+                            weekday_stats = sleep_df[~sleep_df['is_weekend']]['minute_asleep'].mean()
+                            
+                            if not np.isnan(weekend_stats) and not np.isnan(weekday_stats):
+                                sleep_metrics['sleep_social_jetlag_'] = abs(weekend_stats - weekday_stats)
+                    
+                    sleep_features.update(sleep_metrics)
+                except Exception as e:
+                    logger.warning(f"Error processing sleep features: {e}")
+            
+            # Process activity features - similar to process_activity_features in training
+            activity_features = {}
+            if health_data.get("activity") and len(health_data["activity"]) > 0:
+                try:
+                    # Create dataframe from activity data
+                    activity_df = pd.DataFrame(health_data["activity"])
+                    logger.info(f"Activity dataframe columns: {list(activity_df.columns)}")
+                    
+                    # Process calories out features
+                    if 'calories_out' in activity_df.columns:
+                        activity_features['activity_calories_out_mean'] = activity_df['calories_out'].mean()
+                        activity_features['activity_calories_out_std'] = activity_df['calories_out'].std()
+                    
+                    # Process steps features if available in activity data
+                    if 'steps' in activity_df.columns:
+                        activity_features['activity_steps_mean'] = activity_df['steps'].mean()
+                        activity_features['activity_steps_std'] = activity_df['steps'].std()
+                        activity_features['activity_steps_max'] = activity_df['steps'].max()
+                    
+                    # Process activity minutes features
+                    for metric in ['very_active_minutes', 'fairly_active_minutes', 'lightly_active_minutes', 'sedentary_minutes']:
+                        if metric in activity_df.columns:
+                            activity_features[f'activity_{metric}_mean'] = activity_df[metric].mean()
+                            activity_features[f'activity_{metric}_std'] = activity_df[metric].std()
+                            
+                            if metric == 'very_active_minutes':
+                                activity_features[f'activity_{metric}_max'] = activity_df[metric].max()
+                    
+                    # Calculate activity ratio if we have both active and sedentary minutes
+                    if all(col in activity_df.columns for col in ['very_active_minutes', 'fairly_active_minutes', 'lightly_active_minutes', 'sedentary_minutes']):
+                        activity_df['total_active_minutes'] = (
+                            activity_df['very_active_minutes'] + 
+                            activity_df['fairly_active_minutes'] + 
+                            activity_df['lightly_active_minutes']
+                        )
+                        activity_df['activity_ratio'] = activity_df['total_active_minutes'] / (activity_df['sedentary_minutes'] + 1)
+                        
+                        activity_features['activity_activity_ratio_mean'] = activity_df['activity_ratio'].mean()
+                        activity_features['activity_activity_ratio_std'] = activity_df['activity_ratio'].std()
+                except Exception as e:
+                    logger.warning(f"Error processing activity features: {e}")
+            
+            # Process steps data separately if not available in activity data
+            if 'activity_steps_mean' not in activity_features and health_data.get("steps") and len(health_data["steps"]) > 0:
+                try:
+                    steps_df = pd.DataFrame(health_data["steps"])
+                    if 'steps' in steps_df.columns:
+                        activity_features['activity_steps_mean'] = steps_df['steps'].mean()
+                        activity_features['activity_steps_std'] = steps_df['steps'].std()
+                        activity_features['activity_steps_max'] = steps_df['steps'].max()
+                    elif 'sum_steps' in steps_df.columns:
+                        activity_features['activity_steps_mean'] = steps_df['sum_steps'].mean()
+                        activity_features['activity_steps_std'] = steps_df['sum_steps'].std()
+                        activity_features['activity_steps_max'] = steps_df['sum_steps'].max()
+                    elif 'value' in steps_df.columns:
+                        activity_features['activity_steps_mean'] = steps_df['value'].mean()
+                        activity_features['activity_steps_std'] = steps_df['value'].std()
+                        activity_features['activity_steps_max'] = steps_df['value'].max()
+                except Exception as e:
+                    logger.warning(f"Error processing steps features: {e}")
+            
+            # Process heart rate data - similar to process_heart_rate_features in training
+            hr_features = {}
+            if health_data.get("heartRate") and len(health_data["heartRate"]) > 0:
+                try:
+                    hr_df = pd.DataFrame(health_data["heartRate"])
+                    
+                    # Check which column has the heart rate values
+                    hr_column = None
+                    if 'avg_rate' in hr_df.columns:
+                        hr_column = 'avg_rate'
+                    elif 'value' in hr_df.columns:
+                        hr_column = 'value'
+                    
+                    if hr_column:
+                        # Ensure numeric values
+                        hr_df[hr_column] = pd.to_numeric(hr_df[hr_column], errors='coerce')
+                        
+                        # Calculate heart rate metrics
+                        hr_features['hr_avg_rate_mean'] = hr_df[hr_column].mean()
+                        hr_features['hr_avg_rate_std'] = hr_df[hr_column].std()
+                        hr_features['hr_avg_rate_min'] = hr_df[hr_column].min()
+                        hr_features['hr_avg_rate_max'] = hr_df[hr_column].max()
+                        
+                        # Calculate skew if we have scipy
+                        try:
+                            from scipy.stats import skew
+                            hr_features['hr_avg_rate_skew'] = skew(hr_df[hr_column].dropna())
+                        except (ImportError, ValueError):
+                            # Use a placeholder or calculate approximation if scipy not available
+                            logger.warning("Scipy not available or insufficient data for skew calculation")
+                            hr_features['hr_avg_rate_skew'] = 0
+                except Exception as e:
+                    logger.warning(f"Error processing heart rate features: {e}")
+            
+            # Combine all features
+            all_features = {}
+            all_features.update(sleep_features)
+            all_features.update(activity_features)
+            all_features.update(hr_features)
+            
+            # Create expanded features dataframe
+            features_df_expanded = pd.DataFrame([all_features])
+            
+            # Combine user info with extracted features
+            features_df = pd.concat([features_df, features_df_expanded], axis=1)
+            
+            # Fill missing values with means for numeric columns only
+            numeric_columns = features_df.select_dtypes(include=['number']).columns
+            features_df[numeric_columns] = features_df[numeric_columns].fillna(features_df[numeric_columns].mean())
+            
+            # Fill any remaining NaN values with zeros
+            features_df = features_df.fillna(0)
+            
             logger.info(f"Features extracted successfully: shape={features_df.shape}")
-            if logger.level <= logging.DEBUG:  # Only log detailed feature info at DEBUG level
-                logger.debug(f"Feature columns: {list(features_df.columns)[:10]}...")
-            
             return features_df
             
         except Exception as e:
-            logger.error(f"Error transforming health data: {e}", exc_info=True)
-            
-            # Fall back to the old transformation method if the new one fails
-            logger.warning("Falling back to original transformation method")
-            
-            # Create base dataframe with user info
-            fallback_features_df = pd.DataFrame({
-                'age': [health_data.userInfo.get('age', 33)],
-                'gender_binary': [health_data.userInfo.get('genderBinary', 1)]
+            logger.error(f"Error transforming Supabase data: {e}", exc_info=True)
+            # Fall back to minimal dataframe with demographic data only
+            return pd.DataFrame({
+                'person_id': [user_id] if 'user_id' in locals() else ['unknown'],
+                'age': [age] if 'age' in locals() else [33],
+                'gender_binary': [gender_binary] if 'gender_binary' in locals() else [1]
             })
-            
-            # Add dummy values for required features
-            for feature in self.model_feature_names:
-                if feature not in fallback_features_df.columns and feature != 'person_id':
-                    fallback_features_df[feature] = 0
-            
-            logger.warning(f"Created fallback feature dataframe with {len(fallback_features_df.columns)} columns")
-            return fallback_features_df
     
-    def predict(self, health_data: HealthKitData) -> AnalysisResult:
+    def predict(self, health_data: Dict[str, Any]) -> AnalysisResult:
         """
-        Run prediction using the mental health model
+        Predict mental health status from Supabase health data in Fitbit format.
+        Returns structured result with prediction and contributing factors.
+        """
+        logger.info("Making mental health prediction...")
+        # Extract user ID from input data
+        user_id = health_data.get("userInfo", {}).get("personId", "unknown")
         
-        Args:
-            health_data: Processed health data in HealthKitData format
+        # First, check if we have enough data
+        data_quality_score, data_quality_message = self._calculate_data_quality(health_data)
+        
+        # Transform data for model input
+        input_df = self.transform_data(health_data)
+        
+        # Drop person_id as it's not a model feature
+        if 'person_id' in input_df.columns:
+            input_df = input_df.drop('person_id', axis=1)
+        
+        logger.info(f"Input feature dataframe shape: {input_df.shape}")
+        logger.info(f"Generated features: {list(input_df.columns)}")
+        
+        # Check if we have the expected number of features
+        expected_feature_count = 38  # Based on the training model
+        if input_df.shape[1] != expected_feature_count:
+            logger.warning(f"Expected {expected_feature_count} features but got {input_df.shape[1]}")
             
-        Returns:
-            AnalysisResult: Prediction with risk level and contributing factors
-        """
+            # Get the missing features
+            missing_features = [f for f in self.model_feature_names if f not in input_df.columns]
+            if missing_features:
+                logger.warning(f"Missing {len(missing_features)} features: {missing_features[:5]}")
+                
+                # Add missing features with zero values
+                for feat in missing_features:
+                    input_df[feat] = 0
+        
+        # Ensure we have the features in the right order
+        if self.model_feature_names is not None:
+            # Only keep the features we expect
+            common_features = [f for f in self.model_feature_names if f in input_df.columns]
+            # Add zeros for missing ones
+            missing_features = [f for f in self.model_feature_names if f not in input_df.columns]
+            
+            # Reindex to match training feature order
+            if common_features:
+                input_df = input_df[common_features]
+            
+            # Add missing features with zero values
+            for feat in missing_features:
+                input_df[feat] = 0
+                
+            # Final reordering to match model expectations
+            input_df = input_df[self.model_feature_names]
+        
+        # Make prediction
         try:
-            # Get userId from the health data if available, otherwise generate a unique ID
-            user_id = health_data.userInfo.get("personId") or health_data.userInfo.get("userId", str(uuid.uuid4()))
+            # Predict probability
+            prediction_proba = self.model.predict_proba(input_df)[:, 1][0]
+            prediction_class = 1 if prediction_proba >= 0.5 else 0
             
-            # Extract features from the health data
-            logger.info("Transforming health data using HealthKit extractor...")
-            features_df = self.transform_data(health_data)
-
-            if features_df.empty:
-                logger.error("Failed to extract features from health data")
-                # Return a default result
-                return AnalysisResult(
-                    userId=user_id,
-                    prediction=0,
-                    riskLevel="UNKNOWN",
-                    riskScore=0.0,
-                    contributingFactors={},
-                    analysisDate=datetime.now().isoformat()
-                )
-                
-            # Log the shape of the features dataframe
-            logger.info(f"Features extracted successfully: shape={features_df.shape}")
-            # Log the columns
-            logger.info(f"Input feature dataframe shape: {features_df.shape}")
-            logger.info(f"Using {len(features_df.columns)} features (first 5: {list(features_df.columns)[:5]}...)")
+            logger.info(f"Prediction: class={prediction_class}, probability={prediction_proba:.4f}")
             
-            # Check if features match what the model expects
-            if len(features_df.columns) < len(self.model_feature_names):
-                missing_features = [f for f in self.model_feature_names if f not in features_df.columns]
-                logger.warning(f"Missing {len(missing_features)} features expected by model")
-                
-                # Add missing features with default values (0)
-                for feature in missing_features:
-                    features_df[feature] = 0
-            
-            # Ensure columns are in the expected order for the model
-            # Only include columns used in the model
-            model_features = features_df.reindex(columns=self.model_feature_names, fill_value=0)
-            logger.info(f"Using {len(model_features.columns)} feature columns for prediction")
-            
-            # Make prediction
-            y_pred_proba = self.model.predict_proba(model_features)
-            y_pred = self.model.predict(model_features)
-            prediction = int(y_pred[0])
-            probability = y_pred_proba[0][1]  # Probability of class 1
-            
-            logger.info(f"Prediction result: class={prediction}, probability={probability:.4f}")
-            
-            # Get feature importance
-            importance_dict = {}
-            if hasattr(self.model, 'feature_importances_'):
-                importances = self.model.feature_importances_
+            # Map prediction to risk level
+            if prediction_class == 0:
+                risk_level = "LOW"
             else:
-                # For models that don't have feature_importances_
-                importances = self.feature_importances
-                
-            # Create a dictionary of feature importances
-            if len(importances) == len(self.model_feature_names):
-                # Normalize the importances to sum to 1
-                importances_sum = sum(importances)
-                if importances_sum > 0:
-                    normalized_importances = [imp / importances_sum for imp in importances]
-                    importance_dict = dict(zip(self.model_feature_names, normalized_importances))
-                    
-                    # Sort by importance and take top 10
-                    importance_dict = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:10])
+                risk_level = "HIGH"
             
-            # Return the result
-            risk_level = "POSITIVE" if prediction == 1 else "NEGATIVE"
+            # Get feature importance from the model
+            feature_importance = {}
+            # Top 5 contributing factors
+            if hasattr(self, 'feature_importances') and self.feature_importances is not None:
+                top_features = self.feature_importances.sort_values('importance', ascending=False).head(5)
+                for index, row in top_features.iterrows():
+                    # Convert feature names to more readable format
+                    feature_name = row['feature'].replace('_', ' ').title()
+                    feature_importance[feature_name] = float(row['importance'])
             
+            # Create analysis result
             result = AnalysisResult(
-                userId=user_id,
-                prediction=prediction,
-                riskLevel=risk_level,
-                riskScore=float(probability),
-                contributingFactors=importance_dict,
-                analysisDate=datetime.now().isoformat()
+                user_id=user_id,
+                prediction=prediction_class,
+                risk_level=risk_level,
+                risk_score=float(prediction_proba),
+                contributing_factors={
+                    "feature_importance": feature_importance,
+                    "data_quality": {
+                        "score": data_quality_score,
+                        "message": data_quality_message
+                    }
+                },
+                analysis_date=datetime.now().isoformat()
             )
             
             return result
-            
+        
         except Exception as e:
-            logger.error(f"Error during prediction: {str(e)}", exc_info=True)
-            # Return a default result in case of errors
+            logger.error(f"Error making prediction: {str(e)}", exc_info=True)
+            # Return default result with error information
             return AnalysisResult(
-                userId=user_id if 'user_id' in locals() else str(uuid.uuid4()),
+                user_id=user_id,
                 prediction=0,
-                riskLevel="ERROR",
-                riskScore=0.0,
-                contributingFactors={},
-                analysisDate=datetime.now().isoformat()
+                risk_level="UNKNOWN",
+                risk_score=0.0,
+                contributing_factors={
+                    "error": str(e),
+                    "data_quality": {
+                        "score": data_quality_score,
+                        "message": data_quality_message
+                    }
+                },
+                analysis_date=datetime.now().isoformat()
             )
+
+    def _calculate_data_quality(self, health_data: Dict[str, Any]) -> Tuple[int, str]:
+        """
+        Calculate a data quality score based on the completeness of the data
+        Returns a tuple of (score, message)
+        """
+        # Define weights for different data types
+        weights = {
+            'heartRate': 25,
+            'sleep': 25,
+            'steps': 20,
+            'activity': 30
+        }
+        
+        quality_score = 0
+        
+        # Check heart rate data
+        if health_data.get("heartRate") and len(health_data["heartRate"]) > 0:
+            quality_score += weights['heartRate']
+        
+        # Check sleep data
+        if health_data.get("sleep") and len(health_data["sleep"]) > 0:
+            quality_score += weights['sleep']
+            
+        # Check steps data
+        if health_data.get("steps") and len(health_data["steps"]) > 0:
+            quality_score += weights['steps']
+            
+        # Check activity data
+        if health_data.get("activity") and len(health_data["activity"]) > 0:
+            quality_score += weights['activity']
+        
+        # Generate a message based on the data quality score
+        # Count how many required data types are present
+        required_types = ['heartRate', 'sleep', 'steps']
+        present_types = sum(1 for data_type in required_types if health_data.get(data_type) and len(health_data[data_type]) > 0)
+        
+        if present_types == 0:
+            data_quality_message = "Analysis not possible. No required data types present."
+        elif present_types < len(required_types):
+            data_quality_message = f"Analysis based on {present_types}/{len(required_types)} required data types."
+        else:
+            data_quality_message = "Analysis based on all required data types."
+            
+        # Add quality score information
+        if quality_score >= 70:
+            data_quality_message += " Data quality is good."
+        else:
+            data_quality_message += " Data quality needs improvement."
+        
+        return quality_score, data_quality_message
 
 # Lazy-load our predictor and Supabase client
 @app.on_event("startup")
@@ -514,12 +747,9 @@ async def analyze_health_data(
         data_counts = {
             "heartRate": len(health_data.heartRate),
             "steps": len(health_data.steps),
-            "activeEnergy": len(health_data.activeEnergy),
             "sleep": len(health_data.sleep),
             "workout": len(health_data.workout),
-            "basalEnergy": len(health_data.basalEnergy),
-            "flightsClimbed": len(health_data.flightsClimbed),
-            "distance": len(health_data.distance)
+            "activity": getattr(health_data, "activity", 0) if hasattr(health_data, "activity") else 0
         }
         logger.info(f"Received data counts: {data_counts}")
         
@@ -541,9 +771,9 @@ async def analyze_health_data(
         data_counts_before = {
             "heartRate": len(health_data.heartRate),
             "steps": len(health_data.steps),
-            "activeEnergy": len(health_data.activeEnergy),
             "sleep": len(health_data.sleep),
-            "workout": len(health_data.workout)
+            "workout": len(health_data.workout),
+            "activity": getattr(health_data, "activity", 0) if hasattr(health_data, "activity") else 0
         }
         
         # If all timestamps are None, we should upload all data
@@ -581,21 +811,6 @@ async def analyze_health_data(
                 has_new_data = True
                 logger.info(f"Found {len(health_data.steps)} new step records (no previous data)")
             
-            # Filter active energy data
-            if latest_timestamps.get('activeEnergy') and health_data.activeEnergy:
-                last_date = latest_timestamps['activeEnergy']
-                health_data.activeEnergy = [
-                    record for record in health_data.activeEnergy 
-                    if datetime.fromisoformat(record['endDate'].replace('Z', '+00:00')).replace(tzinfo=None) > last_date
-                ]
-                if len(health_data.activeEnergy) > 0:
-                    has_new_data = True
-                    logger.info(f"Found {len(health_data.activeEnergy)} new active energy records after {last_date}")
-            elif health_data.activeEnergy:
-                # No existing active energy data but we have new data
-                has_new_data = True
-                logger.info(f"Found {len(health_data.activeEnergy)} new active energy records (no previous data)")
-            
             # Filter sleep data
             if latest_timestamps.get('sleep') and health_data.sleep:
                 last_date = latest_timestamps['sleep']
@@ -630,9 +845,9 @@ async def analyze_health_data(
         data_counts_after = {
             "heartRate": len(health_data.heartRate),
             "steps": len(health_data.steps),
-            "activeEnergy": len(health_data.activeEnergy),
             "sleep": len(health_data.sleep),
-            "workout": len(health_data.workout)
+            "workout": len(health_data.workout),
+            "activity": getattr(health_data, "activity", 0) if hasattr(health_data, "activity") else 0
         }
         
         logger.info(f"Data counts before filtering: {data_counts_before}")
@@ -686,13 +901,15 @@ async def analyze_health_data(
         supabase_health_model = HealthKitData(
             heartRate=supabase_health_data["heartRate"],
             steps=supabase_health_data["steps"],
-            activeEnergy=supabase_health_data["activeEnergy"],
             sleep=supabase_health_data["sleep"],
             workout=supabase_health_data["workout"],
             distance=supabase_health_data["distance"],
             basalEnergy=supabase_health_data["basalEnergy"],
             flightsClimbed=supabase_health_data["flightsClimbed"],
-            userInfo=supabase_health_data["userInfo"]
+            userInfo=supabase_health_data["userInfo"],
+            # Include activity data - this will be used for activeEnergy since we consolidated the data
+            activity=supabase_health_data["activity"],
+            activeEnergy=supabase_health_data["activity"]  # Use activity data for activeEnergy for backward compatibility
         )
         
         # Log the data counts for analysis without printing actual data
@@ -704,9 +921,9 @@ async def analyze_health_data(
         # Check if we're still missing data after the upload
         if (len(supabase_health_model.heartRate) == 0 and 
             len(supabase_health_model.steps) == 0 and 
-            len(supabase_health_model.activeEnergy) == 0 and 
             len(supabase_health_model.sleep) == 0 and 
-            len(supabase_health_model.workout) == 0):
+            len(supabase_health_model.workout) == 0 and
+            len(supabase_health_data["activity"]) == 0):
             
             logger.warning("No health data found in Supabase after uploading. Using uploaded data directly.")
             # Fall back to the uploaded data if nothing in Supabase
@@ -743,34 +960,34 @@ async def analyze_health_data(
             # Return a structured error response that still matches the AnalysisResult format
             # so the iOS app can display a meaningful message
             return AnalysisResult(
-                userId=user_id,
+                user_id=user_id,
                 prediction=0,
-                riskLevel="INSUFFICIENT_DATA",
-                riskScore=0.0,
-                contributingFactors={
+                risk_level="INSUFFICIENT_DATA",
+                risk_score=0.0,
+                contributing_factors={
                     "error": 1.0,
                     "message": error_msg,
                     "missingDataTypes": {dt: 1.0 for dt in missing_data_types},
                     "availableDataTypes": {dt: 1.0 for dt in available_data_types}
                 },
-                analysisDate=datetime.now().isoformat()
+                analysis_date=datetime.now().isoformat()
             )
         
         # Step 5: Run the prediction using data from Supabase
         logger.info(f"Running prediction using Supabase data for user {user_id}")
-        result = predictor.predict(supabase_health_model)
+        result = predictor.predict(supabase_health_model.dict())
         
         # Step 6: Store analysis result in Supabase
         logger.info(f"Storing analysis result for user {user_id}")
         
         # Create a result dictionary with fields that match the Supabase schema
         result_dict = {
-            "userId": result.userId,
+            "user_id": result.user_id,
             "prediction": result.prediction,
-            "riskLevel": result.riskLevel,
-            "riskScore": result.riskScore,
-            "contributingFactors": result.contributingFactors,
-            "analysisDate": result.analysisDate
+            "riskLevel": result.risk_level,
+            "riskScore": result.risk_score,
+            "contributingFactors": result.contributing_factors,
+            "analysis_date": result.analysis_date
         }
         
         # Add data quality information to the result
@@ -779,9 +996,9 @@ async def analyze_health_data(
             "dataTypes": {
                 "heartRate": len(supabase_health_model.heartRate) > 0,
                 "steps": len(supabase_health_model.steps) > 0,
-                "activeEnergy": len(supabase_health_model.activeEnergy) > 0,
                 "sleep": len(supabase_health_model.sleep) > 0,
-                "workout": len(supabase_health_model.workout) > 0
+                "workout": len(supabase_health_model.workout) > 0,
+                "activity": len(supabase_health_model.activity) > 0
             },
             "message": f"Analysis based on {len(available_data_types)}/{len(required_data_types)} required data types."
         }
@@ -802,7 +1019,7 @@ async def analyze_health_data(
             logger.error(f"Error during analysis result saving: {e}", exc_info=True)
             # Don't fail the request just because saving failed
         
-        logger.info(f"Analysis complete. Risk level: {result.riskLevel}, Score: {result.riskScore:.2f}")
+        logger.info(f"Analysis complete. Risk level: {result.risk_level}, Score: {result.risk_score:.2f}")
         
         # Return the result object directly - the iOS app expects this format
         return result
@@ -833,7 +1050,7 @@ async def check_analysis(
         latest_analysis = supabase.get_latest_analysis(user_id)
         
         return {
-            "userId": user_id,
+            "user_id": user_id,
             "shouldRunAnalysis": should_run,
             "latestAnalysis": latest_analysis,
             "message": "New analysis needed" if should_run else "Latest analysis is still valid"
@@ -870,36 +1087,36 @@ async def get_latest_analysis(
             user_agent = request.headers.get("user-agent", "").lower()
             if "cfnetwork" in user_agent or "darwin" in user_agent:
                 return AnalysisResult(
-                    userId=user_id,
+                    user_id=user_id,
                     prediction=0,
-                    riskLevel="NO_DATA",
-                    riskScore=0.0,
-                    contributingFactors={},
-                    analysisDate=datetime.now().isoformat()
+                    risk_level="NO_DATA",
+                    risk_score=0.0,
+                    contributing_factors={},
+                    analysis_date=datetime.now().isoformat()
                 )
                 
             return {
-                "userId": user_id,
+                "user_id": user_id,
                 "hasAnalysis": False,
                 "message": "No analysis results found for this user"
             }
         
         # Ensure all required fields are present for the iOS app
-        required_fields = ["riskScore", "riskLevel", "analysisDate", "contributingFactors"]
+        required_fields = ["risk_score", "risk_level", "analysis_date", "contributing_factors"]
         for field in required_fields:
             if field not in latest_analysis:
                 logger.warning(f"Missing required field '{field}' in analysis result")
-                if field == "contributingFactors":
+                if field == "contributing_factors":
                     latest_analysis[field] = {}
-                elif field == "riskScore":
+                elif field == "risk_score":
                     latest_analysis[field] = 0.0
-                elif field == "riskLevel":
+                elif field == "risk_level":
                     latest_analysis[field] = "UNKNOWN"
-                elif field == "analysisDate":
+                elif field == "analysis_date":
                     latest_analysis[field] = datetime.now().isoformat()
         
-        # Ensure the userId is consistent with the requested user
-        latest_analysis["userId"] = user_id
+        # Ensure the user_id is consistent with the requested user
+        latest_analysis["user_id"] = user_id
         
         logger.info(f"Returning analysis result: {latest_analysis}")
         
@@ -913,7 +1130,7 @@ async def get_latest_analysis(
         
         # Otherwise return the wrapped format
         return {
-            "userId": user_id,
+            "user_id": user_id,
             "hasAnalysis": True,
             "analysis": latest_analysis
         }
@@ -944,14 +1161,14 @@ async def get_latest_data_timestamp(
         
         if not latest_timestamp:
             return {
-                "userId": user_id,
+                "user_id": user_id,
                 "hasData": False,
                 "latestTimestamp": datetime.now().isoformat(),
                 "message": "No health data found for this user"
             }
         
         return {
-            "userId": user_id,
+            "user_id": user_id,
             "hasData": True,
             "latestTimestamp": latest_timestamp.isoformat(),
             "message": f"Latest data timestamp: {latest_timestamp.isoformat()}"
@@ -1039,7 +1256,7 @@ async def check_data_quality(
         
         # Construct response with all the details
         response = {
-            "userId": user_id,
+            "user_id": user_id,
             "dataQualityScore": completeness_check.get("quality_score", 0),
             "dataComplete": completeness_check.get("complete", False),
             "dataCompleteness": {
@@ -1089,7 +1306,7 @@ async def check_missing_data(
         missing_data_info = supabase.check_missing_data_types(user_id, days)
         
         return {
-            "userId": user_id,
+            "user_id": user_id,
             "checkPeriodDays": days,
             "startDate": (datetime.now() - timedelta(days=days)).isoformat(),
             "endDate": datetime.now().isoformat(),
@@ -1144,7 +1361,7 @@ async def data_collection_guidance(
             ],
             "minimum_requirement": "At least 5 nights of sleep data per week"
         },
-        "activeEnergy": {
+        "activity": {
             "name": "Active Energy",
             "importance": "Medium",
             "description": "Calories burned during activity help measure exercise intensity and frequency.",
@@ -1270,7 +1487,7 @@ async def update_profile(
             raise HTTPException(status_code=500, detail="Failed to update profile")
         
         return {
-            "userId": user_id,
+            "user_id": user_id,
             "success": True,
             "message": "Profile updated successfully"
         }
@@ -1279,6 +1496,66 @@ async def update_profile(
     except Exception as e:
         logger.error(f"Error updating profile: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Profile update failed: {str(e)}")
+
+@app.post("/api/analyze_health_data", response_model=AnalysisResult)
+async def analyze_health_data(token: TokenData):
+    """
+    Analyze user health data to predict mental health indicators.
+    
+    This endpoint:
+    1. Validates the user authentication token
+    2. Retrieves health data from Supabase directly without transformations
+    3. Processes the data using the mental health algorithm
+    4. Returns the analysis results
+    """
+    try:
+        logger.info(f"Analyzing health data for user: {token.sub}")
+        start_time = time.time()
+        
+        # Get user ID from token
+        user_id = token.sub
+        
+        # Create predictor instance if not already cached
+        if user_id not in user_predictors:
+            user_predictors[user_id] = MentalHealthPredictor()
+            
+        predictor = user_predictors[user_id]
+        
+        # Get health data directly from Supabase without format conversions
+        supabase_client = SupabaseClient()
+        health_data_dict = supabase_client.get_health_data_for_analysis(user_id)
+        
+        # Convert dictionary to HealthKitData object
+        health_data = HealthKitData(**health_data_dict)
+        
+        # Log data counts
+        logger.info(f"Retrieved health data for analysis: HR={len(health_data.heartRate or [])}, " 
+                    f"Sleep={len(health_data.sleep or [])}, Activity={len(health_data.activity or [])}")
+        
+        # Analyze the health data
+        if any([
+            len(health_data.heartRate or []) == 0,
+            len(health_data.sleep or []) == 0,
+            len(health_data.activity or []) == 0,
+            len(health_data.steps or []) == 0
+        ]):
+            logger.warning(f"Missing data for at least one health metric: user_id={user_id}")
+            
+        # Use the predictor to transform data and make predictions
+        analysis_result = predictor.predict(health_data.dict())
+        
+        # Log success
+        logger.info(f"Analysis completed successfully in {time.time() - start_time:.2f}s")
+        
+        # Return the analysis results
+        return analysis_result
+        
+    except Exception as e:
+        logger.error(f"Error analyzing health data: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to analyze health data: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
