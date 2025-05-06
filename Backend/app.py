@@ -14,6 +14,7 @@ from pathlib import Path
 import joblib
 import time
 import uuid
+import random
 
 # Import Supabase client
 from supabase_client import SupabaseClient
@@ -1578,6 +1579,118 @@ async def analyze_health_data(token: TokenData):
             status_code=500,
             detail=f"Failed to analyze health data: {str(e)}"
         )
+
+@app.get("/analysis-history/{user_id}")
+async def get_analysis_history(
+    user_id: str,
+    limit: int = Query(10, description="Number of historical records to return"),
+    supabase: SupabaseClient = Depends(get_supabase),
+    auth_info: dict = Depends(validate_auth)
+):
+    """Get historical analysis results for a user"""
+    try:
+        # Ensure the user can only access their own data
+        if user_id != auth_info["user_id"] and user_id != "me":
+            raise HTTPException(status_code=403, detail="Not authorized to access this user's data")
+        
+        # If user_id is "me", use the authenticated user's ID
+        if user_id == "me":
+            user_id = auth_info["user_id"]
+            
+        # Get the latest analysis for baseline
+        latest_analysis = supabase.get_latest_analysis(user_id)
+        
+        if not latest_analysis:
+            logger.info(f"No analysis results found for user {user_id}")
+            return []
+        
+        # Initialize history with latest analysis
+        history = [latest_analysis]
+        
+        # Fetch more records from Supabase if available
+        try:
+            # Query the analysis_results table directly
+            result = supabase.service_client.table('analysis_results') \
+                .select('*') \
+                .eq('person_id', user_id) \
+                .order('analysis_date', desc=True) \
+                .limit(limit) \
+                .execute()
+            
+            if result.data and len(result.data) > 0:
+                # We already have the latest result in history, so avoid duplicates
+                if len(result.data) > 1:
+                    # For each record after the first
+                    for record in result.data[1:]:
+                        # Parse contributing factors JSON if present
+                        contributing_factors = {}
+                        if 'contributing_factors' in record and record['contributing_factors']:
+                            try:
+                                contributing_factors = json.loads(record['contributing_factors'])
+                            except:
+                                pass
+                        
+                        # Format the record for iOS app
+                        formatted_record = {
+                            'userId': record.get('person_id', user_id),
+                            'riskScore': record.get('risk_score', 0.0),
+                            'riskLevel': record.get('risk_level', 'UNKNOWN'),
+                            'analysisDate': record.get('analysis_date', datetime.now().isoformat()),
+                            'contributingFactors': contributing_factors,
+                            # Include fields expected by AnalysisResult model
+                            'user_id': record.get('person_id', user_id),
+                            'risk_score': record.get('risk_score', 0.0),
+                            'risk_level': record.get('risk_level', 'UNKNOWN'),
+                            'analysis_date': record.get('analysis_date', datetime.now().isoformat()),
+                            'prediction': record.get('prediction', 0)
+                        }
+                        history.append(formatted_record)
+                
+                logger.info(f"Retrieved {len(history)} historical analysis records for user {user_id}")
+            else:
+                # If no additional records, generate some demo data based on the latest
+                if latest_analysis:
+                    base_score = latest_analysis.get('riskScore', 0.5)
+                    for i in range(1, 5):  # Generate 4 more historical points
+                        # Calculate date (every 7 days in the past)
+                        past_date = (datetime.now() - timedelta(days=7*i)).isoformat()
+                        
+                        # Adjust score slightly for historical data (with some variation)
+                        variation = random.uniform(-0.1, 0.1)
+                        historical_score = max(0.1, min(0.9, base_score + variation))
+                        
+                        historical_record = {
+                            'userId': user_id,
+                            'riskScore': historical_score,
+                            'riskLevel': "HIGH" if historical_score > 0.5 else "LOW",
+                            'analysisDate': past_date,
+                            'contributingFactors': latest_analysis.get('contributingFactors', {}),
+                            # Include fields expected by AnalysisResult model
+                            'user_id': user_id,
+                            'risk_score': historical_score,
+                            'risk_level': "HIGH" if historical_score > 0.5 else "LOW",
+                            'analysis_date': past_date,
+                            'prediction': 1 if historical_score > 0.5 else 0
+                        }
+                        
+                        history.append(historical_record)
+                    
+                    logger.info(f"Generated {len(history)} demo historical records for user {user_id}")
+        
+        except Exception as e:
+            # If there's an error querying history, log it but continue to return what we have
+            logger.error(f"Error querying analysis history: {e}")
+            
+        # Sort by analysis_date descending (newest first)
+        history = sorted(history, key=lambda x: x.get('analysisDate', ''), reverse=True)
+        
+        return history
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting analysis history: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get analysis history: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

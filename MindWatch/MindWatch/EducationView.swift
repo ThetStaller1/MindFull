@@ -111,7 +111,7 @@ struct EducationView: View {
                             mentalHealthTip(
                                 title: "Practice Mindfulness",
                                 description: "Focus on the present moment without judgment. Try breathing deeply for 5 minutes daily.",
-                                icon: "mind.and.body"
+                                icon: "brain.head.profile"
                             )
                             
                             mentalHealthTip(
@@ -138,6 +138,7 @@ struct EducationView: View {
                                 icon: "phone.down.fill"
                             )
                         }
+                        .padding(.horizontal)
                     }
                     .padding(.vertical)
                     .background(
@@ -191,13 +192,13 @@ struct EducationView: View {
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color(.systemGray4), lineWidth: 1)
         )
-        .padding(.horizontal)
     }
     
     // Helper function to create consistent resource sections
@@ -222,6 +223,7 @@ struct EducationView: View {
             VStack(spacing: 15) {
                 ForEach(resources) { resource in
                     ResourceItemView(resource: resource)
+                        .padding(.horizontal)
                 }
             }
         }
@@ -270,11 +272,11 @@ struct ResourceItemView: View {
                 }
             }
             .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color(.systemGray4), lineWidth: 1)
             )
-            .padding(.horizontal)
         }
         .buttonStyle(PlainButtonStyle())
     }

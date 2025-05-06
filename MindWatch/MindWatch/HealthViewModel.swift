@@ -10,6 +10,7 @@ class HealthViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var lastSyncDate: Date?
     @Published var analysisResult: AnalysisResult?
+    @Published var analysisHistory: [AnalysisResult] = []
     
     // For HealthDataView
     @Published var uploadProgress: Double = 0.0
@@ -748,5 +749,36 @@ class HealthViewModel: ObservableObject {
     // Combined function for Analysis tab to sync data and show analysis
     func syncAndShowAnalysis() {
         syncHealthData()
+    }
+    
+    func fetchAnalysisHistory() {
+        isLoading = true
+        errorMessage = nil
+        
+        Task {
+            do {
+                let history = try await apiService.getAnalysisHistory()
+                DispatchQueue.main.async {
+                    self.analysisHistory = history.sorted { $0.analysisDate > $1.analysisDate }
+                    self.isLoading = false
+                }
+            } catch let error as APIError {
+                DispatchQueue.main.async {
+                    if case .serverError(let message) = error, message.contains("404") {
+                        // The endpoint might not exist yet, so we'll just set an empty array
+                        self.analysisHistory = []
+                        self.errorMessage = nil // Don't show error to user for missing endpoint
+                    } else {
+                        self.errorMessage = "Failed to fetch analysis history: \(error.description)"
+                    }
+                    self.isLoading = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.errorMessage = "Failed to fetch analysis history: \(error.localizedDescription)"
+                    self.isLoading = false
+                }
+            }
+        }
     }
 } 

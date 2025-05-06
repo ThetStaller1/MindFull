@@ -466,7 +466,8 @@ class APIService {
         }
     }
     
-    func getLatestAnalysis() async throws -> AnalysisResult {
+    func getLatestAnalysis() async throws -> AnalysisResult? {
+        // Get latest analysis for the current user
         let endpoint = baseURL.appendingPathComponent("latest-analysis/me")
         
         // Create request
@@ -492,32 +493,71 @@ class APIService {
             if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
                 throw APIError.serverError(message: errorResponse.message)
             } else {
-                throw APIError.serverError(message: "Failed to get latest analysis with status code: \(httpResponse.statusCode)")
+                throw APIError.serverError(message: "Failed to get analysis with status code: \(httpResponse.statusCode)")
             }
         }
         
         // Parse response
-        let decoder = JSONDecoder()
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
-        decoder.dateDecodingStrategy = .formatted(dateFormatter)
-        
-        do {
-            // First check if we need to unwrap the analysis from a container
-            if let responseDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let hasAnalysis = responseDict["hasAnalysis"] as? Bool, hasAnalysis,
-               let analysis = responseDict["analysis"] as? [String: Any],
-               let analysisData = try? JSONSerialization.data(withJSONObject: analysis) {
-                let analysisResult = try decoder.decode(AnalysisResult.self, from: analysisData)
-                return analysisResult
-            } else {
-                // Try direct decode
-                let analysisResult = try decoder.decode(AnalysisResult.self, from: data)
-                return analysisResult
+        if httpResponse.statusCode == 200 {
+            let decoder = JSONDecoder()
+            
+            do {
+                let result = try decoder.decode(AnalysisResult.self, from: data)
+                return result
+            } catch {
+                print("Decoding error: \(error)")
+                throw APIError.decodingError
             }
-        } catch {
-            throw APIError.decodingError
         }
+        
+        return nil
+    }
+    
+    func getAnalysisHistory() async throws -> [AnalysisResult] {
+        // Get analysis history for the current user
+        let endpoint = baseURL.appendingPathComponent("analysis-history/me")
+        
+        // Create request
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        
+        // Add auth token
+        guard let authToken = authToken else {
+            throw APIError.notAuthenticated
+        }
+        
+        request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
+        
+        // Send request
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        // Check response status
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.networkError
+        }
+        
+        if httpResponse.statusCode != 200 {
+            if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
+                throw APIError.serverError(message: errorResponse.message)
+            } else {
+                throw APIError.serverError(message: "Failed to get analysis history with status code: \(httpResponse.statusCode)")
+            }
+        }
+        
+        // Parse response
+        if httpResponse.statusCode == 200 {
+            let decoder = JSONDecoder()
+            
+            do {
+                let results = try decoder.decode([AnalysisResult].self, from: data)
+                return results
+            } catch {
+                print("Decoding error: \(error)")
+                throw APIError.decodingError
+            }
+        }
+        
+        return []
     }
 }
 
