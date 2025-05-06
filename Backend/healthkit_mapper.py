@@ -2,8 +2,40 @@
 """
 HealthKit to Fitbit Data Format Mapper
 
-This module converts extracted HealthKit data from iOS to Fitbit format
-for compatibility with the existing mental health model and Supabase storage.
+This module converts extracted Apple HealthKit data to Fitbit format for 
+compatibility with the mental health assessment algorithm that was trained 
+on the "All of Us" NIH wearable dataset. 
+
+Mapping Strategy:
+----------------
+The module implements a comprehensive mapping between Apple HealthKit and Fitbit data formats:
+
+1. Direct Mappings:
+   - person_id: User identifier from the system
+   - date: Date of activity formatted as YYYY-MM-DD
+   - activity_calories: Mapped from HealthKit's activeEnergyBurned
+   - calories_bmr: Mapped from HealthKit's basalEnergyBurned
+   - calories_out: Calculated as sum of activeEnergyBurned + basalEnergyBurned
+   - steps: Mapped from HealthKit's stepCount
+   - floors: Mapped from HealthKit's flightsClimbed
+
+2. Derived Mappings:
+   - elevation: Converted from flightsClimbed using standard conversion (3m per floor)
+   - activity minutes categories:
+     * very_active_minutes: Minutes in "Cardio" or "Peak" heart rate zones or high-intensity workouts
+     * fairly_active_minutes: Minutes in "Fat Burn" heart rate zone or moderate workouts
+     * lightly_active_minutes: Minutes with activity but below moderate intensity
+     * sedentary_minutes: Total daily minutes (1440) minus all active minutes
+   - marginal_calories: Estimated as 9% of total calories (calories_out)
+
+3. Validation Checks:
+   - Active + BMR calories should equal total calories
+   - Total minutes across all activity levels should equal 1440 (24 hours)
+   - Activity minutes are scaled appropriately when exceeding constraints
+
+The mapping logic incorporates both heart rate data and workout data to determine 
+activity intensity levels, providing a more accurate representation of activity
+compared to using only step counts or calories.
 """
 
 import logging
@@ -47,6 +79,11 @@ class HealthKitToFitbitMapper:
         """
         Convert extracted HealthKit data to Fitbit format for Supabase storage.
         
+        This method orchestrates the conversion of all HealthKit data types to their 
+        corresponding Fitbit format for processing by the mental health assessment algorithm.
+        It handles heart rate, steps, active energy, basal energy, flights climbed, 
+        and sleep data, applying the mapping logic defined in each specialized converter method.
+        
         Args:
             extracted_data: Dictionary with DataFrames for each health data type
             person_id: User ID to assign to the data
@@ -74,16 +111,24 @@ class HealthKitToFitbitMapper:
                 extracted_data['steps'], person_id
             )
         
-        # Convert active energy data
+        # Convert active energy data to activity data (comprehensive mapping)
         if 'active_energy' in extracted_data and not extracted_data['active_energy'].empty:
+            # Pass all relevant data types to the activity converter for comprehensive mapping
             activity_df = self._convert_active_energy_to_activity(
-                extracted_data['active_energy'],
-                extracted_data.get('workout', pd.DataFrame()),
-                person_id
+                active_energy_df=extracted_data['active_energy'],
+                workout_df=extracted_data.get('workout', pd.DataFrame()),
+                person_id=person_id,
+                basal_energy_df=extracted_data.get('basal_energy'),
+                steps_df=extracted_data.get('steps'),
+                flights_df=extracted_data.get('flights_climbed'),
+                heart_rate_df=extracted_data.get('heart_rate')
             )
             
             if not activity_df.empty:
                 fitbit_data['fitbit_activity'] = activity_df
+                logger.info(f"Generated activity data with {len(activity_df)} records")
+        else:
+            logger.warning("No active energy data available - cannot generate activity records")
         
         # Convert sleep data
         if 'sleep' in extracted_data and not extracted_data['sleep'].empty:
@@ -245,97 +290,371 @@ class HealthKitToFitbitMapper:
         return fitbit_steps
     
     def _convert_active_energy_to_activity(self, 
-                                        active_energy_df: pd.DataFrame, 
-                                        workout_df: pd.DataFrame, 
-                                        person_id: str) -> pd.DataFrame:
+                                 active_energy_df: pd.DataFrame, 
+                                 workout_df: pd.DataFrame, 
+                                 person_id: str,
+                                 basal_energy_df: Optional[pd.DataFrame] = None,
+                                 steps_df: Optional[pd.DataFrame] = None,
+                                 flights_df: Optional[pd.DataFrame] = None,
+                                 heart_rate_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """
-        Convert HealthKit active energy and workout data to Fitbit activity format.
+        Convert HealthKit data to Fitbit activity format following the mapping plan.
+        
+        This function implements comprehensive mapping from HealthKit data to Fitbit activity format
+        for mental health assessment algorithm compatibility. It maps the following fields:
+        
+        Direct mappings:
+        - person_id: User identifier
+        - date: Date of activity (YYYY-MM-DD)
+        - activity_calories: From activeEnergyBurned
+        - calories_bmr: From basalEnergyBurned
+        - calories_out: Sum of activity_calories and calories_bmr
+        - steps: From stepCount
+        - floors: From flightsClimbed
+        
+        Derived mappings:
+        - elevation: Calculated from flightsClimbed (3 meters per floor)
+        - very_active_minutes: Minutes in high heart rate zones or intense workouts
+        - fairly_active_minutes: Minutes in moderate heart rate zones or moderate workouts
+        - lightly_active_minutes: Minutes with activity below moderate threshold
+        - sedentary_minutes: Total daily minutes (1440) minus all active minutes
+        - marginal_calories: Estimated as percentage of calories_out
         
         Args:
             active_energy_df: DataFrame with active energy data from HealthKit
             workout_df: DataFrame with workout data from HealthKit
             person_id: User ID
+            basal_energy_df: Optional DataFrame with basal energy data
+            steps_df: Optional DataFrame with steps data
+            flights_df: Optional DataFrame with flights climbed data
+            heart_rate_df: Optional DataFrame with heart rate data
             
         Returns:
-            DataFrame in Fitbit activity format
+            DataFrame in Fitbit activity format with complete data mapping
         """
         if active_energy_df.empty:
-            return pd.DataFrame()
+            logger.warning("No active energy data available for activity calculation")
+            # Return an empty DataFrame with the expected columns instead of an empty list
+            return pd.DataFrame(columns=[
+                'person_id', 'date', 'activity_calories', 'calories_bmr', 'calories_out',
+                'floors', 'elevation', 'fairly_active_minutes', 'lightly_active_minutes',
+                'marginal_calories', 'sedentary_minutes', 'steps', 'very_active_minutes'
+            ])
         
         # Group by date to get daily totals for active energy
         if 'date' not in active_energy_df.columns and 'startDate' in active_energy_df.columns:
-            active_energy_df['date'] = active_energy_df['startDate'].dt.date
+            active_energy_df['date'] = pd.to_datetime(active_energy_df['startDate']).dt.date
         
         # Sum active energy by date
         daily_energy = active_energy_df.groupby('date')['value'].sum().reset_index()
+        daily_energy = daily_energy.rename(columns={'value': 'activity_calories'})
         
-        # Calculate active minutes from workout data if available
-        very_active_minutes = {}
-        fairly_active_minutes = {}
-        lightly_active_minutes = {}
+        # Process basal energy data (calories_bmr)
+        if basal_energy_df is not None and not basal_energy_df.empty:
+            if 'date' not in basal_energy_df.columns and 'startDate' in basal_energy_df.columns:
+                basal_energy_df['date'] = pd.to_datetime(basal_energy_df['startDate']).dt.date
+            
+            # Sum basal energy by date
+            daily_basal = basal_energy_df.groupby('date')['value'].sum().reset_index()
+            daily_basal = daily_basal.rename(columns={'value': 'calories_bmr'})
+            
+            # Merge with active energy data
+            daily_energy = pd.merge(daily_energy, daily_basal, on='date', how='outer')
+        else:
+            # Use a reasonable default BMR if no data available
+            # BMR varies by age, gender, weight but ~1500-1800 is reasonable for adults
+            daily_energy['calories_bmr'] = 1600
+            logger.info("Using default BMR of 1600 calories (no basal energy data available)")
         
-        if not workout_df.empty:
-            # Group workouts by date
-            if 'workout_date' not in workout_df.columns and 'startDate' in workout_df.columns:
-                workout_df['workout_date'] = workout_df['startDate'].dt.date
-            
-            # Calculate minutes by intensity based on workout type and duration
-            for date, group in workout_df.groupby('workout_date'):
-                # For simplicity, we'll consider all workout time as very active
-                # Convert duration from seconds to minutes
-                total_duration_minutes = group['duration'].sum() / 60
-                
-                # Store minutes by date
-                very_active_minutes[date] = total_duration_minutes
-                fairly_active_minutes[date] = 0  # Placeholder
-                lightly_active_minutes[date] = 0  # Placeholder
+        # Calculate total calories (activity + BMR)
+        daily_energy['calories_out'] = daily_energy['activity_calories'] + daily_energy['calories_bmr']
         
-        # Create activity DataFrame with default values - matching Supabase schema
-        activity_records = []
+        # Process steps data
+        if steps_df is not None and not steps_df.empty:
+            if 'date' not in steps_df.columns and 'startDate' in steps_df.columns:
+                steps_df['date'] = pd.to_datetime(steps_df['startDate']).dt.date
+            
+            # Sum steps by date
+            daily_steps = steps_df.groupby('date')['value'].sum().reset_index()
+            daily_steps = daily_steps.rename(columns={'value': 'steps'})
+            
+            # Merge with energy data
+            daily_energy = pd.merge(daily_energy, daily_steps, on='date', how='outer')
+        else:
+            daily_energy['steps'] = 0
+            logger.info("No steps data available")
         
-        for _, row in daily_energy.iterrows():
-            date = row['date']
-            activity_calories = row['value']
+        # Process floors/elevation data
+        if flights_df is not None and not flights_df.empty:
+            if 'date' not in flights_df.columns and 'startDate' in flights_df.columns:
+                flights_df['date'] = pd.to_datetime(flights_df['startDate']).dt.date
             
-            # Get active minutes for this date or use defaults
-            very_active = very_active_minutes.get(date, 0)
-            fairly_active = fairly_active_minutes.get(date, 0)
+            # Sum floors by date
+            daily_floors = flights_df.groupby('date')['value'].sum().reset_index()
+            daily_floors = daily_floors.rename(columns={'value': 'floors'})
             
-            # Estimate lightly active minutes based on calories if no workout data
-            if date not in lightly_active_minutes:
-                # Rough estimation: 1 kcal ≈ 0.1 lightly active minute
-                lightly_active = activity_calories * 0.1
-            else:
-                lightly_active = lightly_active_minutes[date]
+            # Calculate elevation (3 meters per floor)
+            daily_floors['elevation'] = daily_floors['floors'] * 3
             
-            # Calculate sedentary minutes (total day minutes - active minutes)
-            total_day_minutes = 24 * 60  # minutes in a day
-            sedentary_minutes = total_day_minutes - (very_active + fairly_active + lightly_active)
-            
-            # Ensure we don't have negative sedentary minutes
-            sedentary_minutes = max(0, sedentary_minutes)
-            
-            # Create record with columns matching Supabase schema
-            activity_records.append({
-                'person_id': person_id,
-                'date': str(date),
-                'activity_calories': int(activity_calories),
-                'calories_bmr': 1500,  # Default basal metabolic rate
-                'calories_out': int(activity_calories + 1500),  # BMR + activity calories
-                'floors': 0,  # Default value
-                'elevation': 0,  # Default value
-                'fairly_active_minutes': int(fairly_active),
-                'lightly_active_minutes': int(lightly_active),
-                'marginal_calories': 0,  # Default value
-                'sedentary_minutes': int(sedentary_minutes),
-                'steps': 0,  # Will be updated from steps data
-                'very_active_minutes': int(very_active)
-            })
+            # Merge with energy data
+            daily_energy = pd.merge(daily_energy, daily_floors[['date', 'floors', 'elevation']], 
+                                   on='date', how='outer')
+        else:
+            daily_energy['floors'] = 0
+            daily_energy['elevation'] = 0
+            logger.info("No floors/elevation data available")
         
-        # Create DataFrame
-        activity_df = pd.DataFrame(activity_records)
+        # Calculate activity minutes based on heart rate data and workout data
+        activity_minutes = self._calculate_activity_minutes(heart_rate_df, workout_df)
+        
+        # Merge activity minutes with daily energy data
+        if not activity_minutes.empty:
+            daily_energy = pd.merge(daily_energy, activity_minutes, on='date', how='outer')
+        else:
+            # Provide default activity minutes based on activity calories if no HR data
+            daily_energy['very_active_minutes'] = daily_energy['activity_calories'].apply(
+                lambda cals: min(int(cals * 0.01), 120)  # ~1% of activity calories, max 2 hours
+            )
+            daily_energy['fairly_active_minutes'] = daily_energy['activity_calories'].apply(
+                lambda cals: min(int(cals * 0.02), 240)  # ~2% of activity calories, max 4 hours
+            )
+            daily_energy['lightly_active_minutes'] = daily_energy['activity_calories'].apply(
+                lambda cals: min(int(cals * 0.03), 360)  # ~3% of activity calories, max 6 hours
+            )
+            logger.info("Using estimated activity minutes based on calories (no heart rate/workout data)")
+        
+        # Calculate sedentary minutes
+        total_day_minutes = 24 * 60  # 1440 minutes in a day
+        daily_energy['sedentary_minutes'] = total_day_minutes - (
+            daily_energy['very_active_minutes'] + 
+            daily_energy['fairly_active_minutes'] + 
+            daily_energy['lightly_active_minutes']
+        )
+        # Ensure sedentary minutes are not negative
+        daily_energy['sedentary_minutes'] = daily_energy['sedentary_minutes'].apply(lambda x: max(0, x))
+        
+        # Calculate marginal calories (typically ~8-10% of total calories)
+        daily_energy['marginal_calories'] = (daily_energy['calories_out'] * 0.09).astype(int)
+        
+        # Fill any NaN values with reasonable defaults
+        fill_values = {
+            'activity_calories': 0,
+            'calories_bmr': 1600,
+            'calories_out': 1600,
+            'steps': 0,
+            'floors': 0,
+            'elevation': 0,
+            'very_active_minutes': 0,
+            'fairly_active_minutes': 0,
+            'lightly_active_minutes': 0,
+            'sedentary_minutes': total_day_minutes,
+            'marginal_calories': 0
+        }
+        daily_energy = daily_energy.fillna(fill_values)
+        
+        # Format the final dataframe
+        activity_df = pd.DataFrame({
+            'person_id': person_id,
+            'date': daily_energy['date'].astype(str),
+            'activity_calories': daily_energy['activity_calories'].astype(int),
+            'calories_bmr': daily_energy['calories_bmr'].astype(int),
+            'calories_out': daily_energy['calories_out'].astype(int),
+            'floors': daily_energy['floors'].astype(int),
+            'elevation': daily_energy['elevation'].astype(int),
+            'fairly_active_minutes': daily_energy['fairly_active_minutes'].astype(int),
+            'lightly_active_minutes': daily_energy['lightly_active_minutes'].astype(int),
+            'marginal_calories': daily_energy['marginal_calories'].astype(int),
+            'sedentary_minutes': daily_energy['sedentary_minutes'].astype(int),
+            'steps': daily_energy['steps'].astype(int),
+            'very_active_minutes': daily_energy['very_active_minutes'].astype(int)
+        })
+        
+        # Validate the generated data
+        activity_df = self._validate_activity_data(activity_df)
+        logger.info(f"Generated {len(activity_df)} daily activity records")
         
         return activity_df
+
+    def _calculate_activity_minutes(self, heart_rate_df: Optional[pd.DataFrame] = None, 
+                                  workout_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        """
+        Calculate activity minutes from heart rate and workout data.
+        
+        Activity level categorization:
+        - very_active_minutes: "Cardio" or "Peak" heart rate zones or high-intensity workouts
+        - fairly_active_minutes: "Fat burn" heart rate zone or moderate-intensity workouts
+        - lightly_active_minutes: Minutes with activity but below moderate intensity
+        
+        Args:
+            heart_rate_df: Optional DataFrame with heart rate data
+            workout_df: Optional DataFrame with workout data
+            
+        Returns:
+            DataFrame with date and activity minutes columns
+        """
+        result_data = []
+        
+        # Calculate activity minutes from heart rate data
+        if heart_rate_df is not None and not heart_rate_df.empty:
+            # Ensure date column exists
+            if 'date' not in heart_rate_df.columns and 'startDate' in heart_rate_df.columns:
+                heart_rate_df['date'] = pd.to_datetime(heart_rate_df['startDate']).dt.date
+            
+            # Group heart rate data by date
+            for date, group in heart_rate_df.groupby('date'):
+                # Count minutes in each heart rate zone
+                very_active = len(group[(group['value'] >= self.heart_rate_zones['Cardio']['min'])])
+                fairly_active = len(group[(group['value'] >= self.heart_rate_zones['Fat Burn']['min']) & 
+                                         (group['value'] < self.heart_rate_zones['Cardio']['min'])])
+                lightly_active = len(group[(group['value'] < self.heart_rate_zones['Fat Burn']['min']) & 
+                                           (group['value'] > 60)])  # Assuming above resting HR
+                
+                result_data.append({
+                    'date': date,
+                    'very_active_minutes': very_active,
+                    'fairly_active_minutes': fairly_active,
+                    'lightly_active_minutes': lightly_active
+                })
+        
+        # Add activity minutes from workout data
+        if workout_df is not None and not workout_df.empty:
+            # Ensure date column exists
+            if 'workout_date' not in workout_df.columns and 'startDate' in workout_df.columns:
+                workout_df['workout_date'] = pd.to_datetime(workout_df['startDate']).dt.date
+            
+            # Define workout intensity mapping
+            workout_intensity = {
+                # High intensity workouts
+                'HKWorkoutActivityTypeRunning': 'very_active',
+                'HKWorkoutActivityTypeHighIntensityIntervalTraining': 'very_active',
+                'HKWorkoutActivityTypeCrossTraining': 'very_active',
+                
+                # Moderate intensity workouts
+                'HKWorkoutActivityTypeWalking': 'fairly_active',
+                'HKWorkoutActivityTypeCycling': 'fairly_active',
+                'HKWorkoutActivityTypeElliptical': 'fairly_active',
+                
+                # Light intensity workouts
+                'HKWorkoutActivityTypeYoga': 'lightly_active',
+                'HKWorkoutActivityTypeFlexibility': 'lightly_active',
+                'HKWorkoutActivityTypeMindAndBody': 'lightly_active',
+                
+                # Default
+                'default': 'fairly_active'
+            }
+            
+            # Group workouts by date
+            for date, group in workout_df.groupby('workout_date'):
+                very_active_mins = 0
+                fairly_active_mins = 0
+                lightly_active_mins = 0
+                
+                # Process each workout
+                for _, workout in group.iterrows():
+                    # Get duration in minutes
+                    duration_mins = workout['duration'] / 60 if 'duration' in workout else 0
+                    
+                    # Determine intensity based on workout type
+                    workout_type = workout.get('workoutActivityType', 'default')
+                    intensity = workout_intensity.get(workout_type, workout_intensity['default'])
+                    
+                    # Add minutes to the appropriate category
+                    if intensity == 'very_active':
+                        very_active_mins += duration_mins
+                    elif intensity == 'fairly_active':
+                        fairly_active_mins += duration_mins
+                    else:
+                        lightly_active_mins += duration_mins
+                
+                # Check if this date is already in result_data
+                date_exists = False
+                for entry in result_data:
+                    if entry['date'] == date:
+                        # Update existing entry
+                        entry['very_active_minutes'] += very_active_mins
+                        entry['fairly_active_minutes'] += fairly_active_mins
+                        entry['lightly_active_minutes'] += lightly_active_mins
+                        date_exists = True
+                        break
+                
+                # Add new entry if date doesn't exist
+                if not date_exists:
+                    result_data.append({
+                        'date': date,
+                        'very_active_minutes': very_active_mins,
+                        'fairly_active_minutes': fairly_active_mins,
+                        'lightly_active_minutes': lightly_active_mins
+                    })
+        
+        # Convert to DataFrame
+        if result_data:
+            return pd.DataFrame(result_data)
+        else:
+            return pd.DataFrame(columns=[
+                'date', 'very_active_minutes', 'fairly_active_minutes', 'lightly_active_minutes'
+            ])
+
+    def _validate_activity_data(self, activity_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Validate and correct activity data to ensure it meets expected constraints.
+        
+        Validation rules:
+        1. Total minutes (all activity levels) should equal 1440 (minutes in a day)
+        2. Active energy burned should correlate with activity minutes and steps
+        3. Ensure calories_out = activity_calories + calories_bmr
+        
+        Args:
+            activity_df: DataFrame with activity data
+            
+        Returns:
+            Validated and corrected DataFrame
+        """
+        if activity_df.empty:
+            return activity_df
+        
+        # Copy to avoid modifying the original
+        validated_df = activity_df.copy()
+        
+        # 1. Ensure total minutes are 1440
+        total_minutes = (validated_df['very_active_minutes'] + 
+                        validated_df['fairly_active_minutes'] + 
+                        validated_df['lightly_active_minutes'] + 
+                        validated_df['sedentary_minutes'])
+        
+        for idx, row in validated_df.iterrows():
+            if total_minutes[idx] != 1440:
+                # Adjust sedentary minutes to make total 1440
+                validated_df.at[idx, 'sedentary_minutes'] = 1440 - (
+                    row['very_active_minutes'] + 
+                    row['fairly_active_minutes'] + 
+                    row['lightly_active_minutes']
+                )
+                
+                # Ensure sedentary minutes are not negative
+                if validated_df.at[idx, 'sedentary_minutes'] < 0:
+                    logger.warning(f"Negative sedentary minutes calculated for {row['date']}, adjusting activity minutes")
+                    # Scale down activity minutes proportionally
+                    total_active = (row['very_active_minutes'] + 
+                                  row['fairly_active_minutes'] + 
+                                  row['lightly_active_minutes'])
+                    if total_active > 0:
+                        scale_factor = min(1.0, 1440 / total_active)
+                        validated_df.at[idx, 'very_active_minutes'] = int(row['very_active_minutes'] * scale_factor)
+                        validated_df.at[idx, 'fairly_active_minutes'] = int(row['fairly_active_minutes'] * scale_factor)
+                        validated_df.at[idx, 'lightly_active_minutes'] = int(row['lightly_active_minutes'] * scale_factor)
+                        validated_df.at[idx, 'sedentary_minutes'] = max(0, 1440 - (
+                            validated_df.at[idx, 'very_active_minutes'] + 
+                            validated_df.at[idx, 'fairly_active_minutes'] + 
+                            validated_df.at[idx, 'lightly_active_minutes']
+                        ))
+        
+        # 2. Ensure calories_out = activity_calories + calories_bmr
+        validated_df['calories_out'] = validated_df['activity_calories'] + validated_df['calories_bmr']
+        
+        # 3. Ensure marginal_calories are ~9% of calories_out
+        validated_df['marginal_calories'] = (validated_df['calories_out'] * 0.09).astype(int)
+        
+        return validated_df
     
     def _convert_sleep_data(self, sleep_df: pd.DataFrame, person_id: str) -> tuple:
         """

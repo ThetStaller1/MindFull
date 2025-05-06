@@ -206,6 +206,9 @@ class APIService {
                 case "basal_energy":
                     dataPoint["type"] = "HKQuantityTypeIdentifierBasalEnergyBurned"
                     request.basalEnergy.append(dataPoint)
+                case "flights_climbed":
+                    dataPoint["type"] = "HKQuantityTypeIdentifierFlightsClimbed"
+                    request.flightsClimbed.append(dataPoint)
                 case "sleep_analysis":
                     dataPoint["type"] = "HKCategoryTypeIdentifierSleepAnalysis"
                     
@@ -261,7 +264,8 @@ class APIService {
         
         // Verify we have data to send
         let totalDataPoints = request.heartRate.count + request.steps.count + request.activeEnergy.count + 
-                             request.basalEnergy.count + request.sleep.count + request.workout.count
+                             request.basalEnergy.count + request.sleep.count + request.workout.count + 
+                             request.flightsClimbed.count
         
         if totalDataPoints == 0 {
             throw APIError.serverError(message: "No valid health data to send")
@@ -274,6 +278,7 @@ class APIService {
         print("- Basal energy: \(request.basalEnergy.count)")
         print("- Sleep: \(request.sleep.count)")
         print("- Workout: \(request.workout.count)")
+        print("- Flights climbed: \(request.flightsClimbed.count)")
         
         // Create request
         var urlRequest = URLRequest(url: endpoint)
@@ -295,12 +300,13 @@ class APIService {
             throw APIError.serverError(message: "Failed to encode health data: \(error.localizedDescription)")
         }
         
-        // Send request with timeout
+        // First attempt with a generous timeout for complete synchronous processing
         var urlConfig = URLSessionConfiguration.default
-        urlConfig.timeoutIntervalForRequest = 60.0 // Longer timeout for large health data
+        urlConfig.timeoutIntervalForRequest = 300.0 // Increased timeout (5 minutes)
         let session = URLSession(configuration: urlConfig)
         
         do {
+            // Try to upload and get a complete response within the timeout
             let (data, response) = try await session.data(for: urlRequest)
             
             // Check response status
@@ -317,9 +323,43 @@ class APIService {
             }
             
             print("Health data upload successful")
+            return
         } catch let urlError as URLError {
             if urlError.code == .timedOut {
-                throw APIError.serverError(message: "Request timed out. Try with less data.")
+                // The request timed out, but the server might still be processing the data
+                // Switch to polling mode to check if data was processed successfully
+                print("Upload request timed out, polling for data processing status...")
+                
+                // Extract user ID for checking latest sync timestamp
+                guard let userId = getUserIdFromToken(authToken) else {
+                    throw APIError.serverError(message: "Unable to determine user ID for polling")
+                }
+                
+                // Poll for a max of 5 minutes (30 attempts, 10 seconds apart)
+                let maxAttempts = 30
+                for attempt in 1...maxAttempts {
+                    print("Polling attempt \(attempt) of \(maxAttempts)...")
+                    
+                    do {
+                        // Wait before checking
+                        try await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
+                        
+                        // Check if data has been processed by checking the latest sync date
+                        let syncDate = try await getLastSyncDate()
+                        
+                        // If we have a sync date that's recent (within the last 2 minutes), the upload was successful
+                        if let date = syncDate, date.timeIntervalSinceNow > -120 {
+                            print("Data processing completed successfully during polling")
+                            return
+                        }
+                    } catch {
+                        print("Error during polling: \(error)")
+                        // Continue polling despite errors
+                    }
+                }
+                
+                // If we get here, polling timed out
+                throw APIError.serverError(message: "Server processing timeout. The data was sent but processing took too long.")
             } else {
                 throw APIError.networkError
             }

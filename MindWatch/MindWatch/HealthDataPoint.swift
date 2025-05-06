@@ -9,6 +9,7 @@ struct HealthKitDataPoint {
         case basalEnergy = "basal_energy"
         case oxygenSaturation = "oxygen_saturation"
         case respiratoryRate = "respiratory_rate"
+        case flightsClimbed = "flights_climbed"
         case workout = "workout"
     }
     

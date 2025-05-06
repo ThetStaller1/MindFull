@@ -29,6 +29,7 @@ class HealthViewModel: ObservableObject {
         HKQuantityType(.activeEnergyBurned),
         HKQuantityType(.basalEnergyBurned),
         HKQuantityType(.oxygenSaturation),
+        HKQuantityType(.flightsClimbed),
         HKCategoryType(.sleepAnalysis)
     ]
     
@@ -128,15 +129,55 @@ class HealthViewModel: ObservableObject {
                     self.uploadProgressMessage = "Sending data to server..."
                 }
                 
-                // Send health data to the backend
-                try await apiService.sendHealthData(healthData)
+                // Add a progress update for potentially long server processing
+                let progressUpdateTask = Task {
+                    var percentage = 0.5
+                    var messageIndex = 0
+                    let processingMessages = [
+                        "Processing your health data...",
+                        "Analyzing patterns in your data...",
+                        "Almost there, finalizing analysis...",
+                        "Still working, please wait..."
+                    ]
+                    
+                    // Update progress periodically while the server processes data
+                    while !Task.isCancelled {
+                        // Wait a bit before updating
+                        try await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
+                        
+                        // Update progress and message
+                        DispatchQueue.main.async {
+                            // Increment progress slowly up to 95%
+                            if percentage < 0.95 {
+                                percentage += 0.05
+                                self.uploadProgress = percentage
+                            }
+                            
+                            // Cycle through messages
+                            messageIndex = (messageIndex + 1) % processingMessages.count
+                            self.uploadProgressMessage = processingMessages[messageIndex]
+                        }
+                    }
+                }
                 
-                // Update the last sync date to now
-                DispatchQueue.main.async {
-                    self.lastSyncDate = Date()
-                    self.uploadProgress = 1.0
-                    self.uploadProgressMessage = "Sync complete!"
-                    self.isLoading = false
+                // Send health data to the backend
+                do {
+                    try await apiService.sendHealthData(healthData)
+                    
+                    // Cancel the progress update task as we're done
+                    progressUpdateTask.cancel()
+                    
+                    // Update the last sync date to now
+                    DispatchQueue.main.async {
+                        self.lastSyncDate = Date()
+                        self.uploadProgress = 1.0
+                        self.uploadProgressMessage = "Sync complete!"
+                        self.isLoading = false
+                    }
+                } catch {
+                    // Cancel the progress update task if there's an error
+                    progressUpdateTask.cancel()
+                    throw error
                 }
             } catch let error as APIError {
                 DispatchQueue.main.async {
@@ -175,6 +216,7 @@ class HealthViewModel: ObservableObject {
         var activeEnergy: [HealthKitDataPoint] = []
         var sleep: [HealthKitDataPoint] = []
         var workout: [HealthKitDataPoint] = []
+        var flightsClimbed: [HealthKitDataPoint] = []
         
         for point in healthData {
             switch point.type {
@@ -188,6 +230,8 @@ class HealthViewModel: ObservableObject {
                 sleep.append(point)
             case .workout:
                 workout.append(point)
+            case .flightsClimbed:
+                flightsClimbed.append(point)
             default:
                 break
             }
@@ -467,6 +511,8 @@ class HealthViewModel: ObservableObject {
             return .basalEnergy
         case HKQuantityTypeIdentifier.oxygenSaturation.rawValue:
             return .oxygenSaturation
+        case HKQuantityTypeIdentifier.flightsClimbed.rawValue:
+            return .flightsClimbed
         default:
             fatalError("Unexpected quantity type: \(quantityType.identifier)")
         }
@@ -494,6 +540,9 @@ class HealthViewModel: ObservableObject {
         case HKQuantityTypeIdentifier.oxygenSaturation.rawValue:
             return HKUnit.percent()
             
+        case HKQuantityTypeIdentifier.flightsClimbed.rawValue:
+            return HKUnit.count()
+            
         default:
             return HKUnit.count()
         }
@@ -514,6 +563,9 @@ class HealthViewModel: ObservableObject {
             
         case HKQuantityTypeIdentifier.oxygenSaturation.rawValue:
             return "percent"
+            
+        case HKQuantityTypeIdentifier.flightsClimbed.rawValue:
+            return "count"
             
         default:
             return "unknown"
@@ -574,6 +626,7 @@ class HealthViewModel: ObservableObject {
         var activeEnergy = 0
         var sleepAnalysis = 0
         var workout = 0
+        var flightsClimbed = 0
         var other = 0
         
         for point in data {
@@ -583,6 +636,7 @@ class HealthViewModel: ObservableObject {
             case .activeEnergy: activeEnergy += 1
             case .sleepAnalysis: sleepAnalysis += 1
             case .workout: workout += 1
+            case .flightsClimbed: flightsClimbed += 1
             default: other += 1
             }
         }
@@ -594,6 +648,7 @@ class HealthViewModel: ObservableObject {
         - Active Energy: \(activeEnergy)
         - Sleep: \(sleepAnalysis)
         - Workouts: \(workout)
+        - Flights Climbed: \(flightsClimbed)
         - Other: \(other)
         """
     }

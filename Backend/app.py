@@ -855,7 +855,16 @@ async def analyze_health_data(
         
         # Step 2: Store health data in Supabase (only if we have new data)
         if has_new_data:
-            logger.info(f"Storing {sum(data_counts_after.values())} new health data records for user {user_id}")
+            # Convert any list values to their length before summing
+            safe_count_values = []
+            for value in data_counts_after.values():
+                if isinstance(value, list):
+                    safe_count_values.append(len(value))
+                else:
+                    safe_count_values.append(value)
+            
+            total_records = sum(safe_count_values)
+            logger.info(f"Storing {total_records} new health data records for user {user_id}")
             
             try:
                 # Pass health_data.dict() as first parameter and user_id as second parameter
